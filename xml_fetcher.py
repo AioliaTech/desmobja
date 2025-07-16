@@ -32,9 +32,14 @@ def converter_km(km_str):
 
 # =================== FETCHER SIMPLES =======================
 
-def get_xml_url():
-    """Pega URL do XML da variável de ambiente"""
-    return os.environ.get("XML_URL_DESMOBJA", "https://n8n-n8n-start.xnvwew.easypanel.host/webhook/xml")
+def get_xml_urls():
+    urls = []
+    for var, val in os.environ.items():
+        if var.startswith("XML_URL") and val:
+            urls.append(val)
+    if "XML_URL" in os.environ and os.environ["XML_URL"] not in urls:
+        urls.append(os.environ["XML_URL"])
+    return urls
 
 def fetch_and_convert_xml():
     try:
