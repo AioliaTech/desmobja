@@ -1,200 +1,110 @@
-import requests, xmltodict, json, os, re
+import requests
+import xml.etree.ElementTree as ET
+import json
+import os
 from datetime import datetime
-from unidecode import unidecode
 
-JSON_FILE = "data.json"
-
-# =================== MAPS =======================
-MAPEAMENTO_CATEGORIAS = {
-    # (seu dicionário inteiro aqui)
-    "gol": "Hatch", "uno": "Hatch", "palio": "Hatch", # ...etc
-}
-MAPEAMENTO_CILINDRADAS = {
-    "g 310": 300, "f 750 gs": 850, "f 850 gs": 850, "f 900": 900, "r 1250": 1250,
-    "r 1300": 1300, "r 18": 1800, "k 1300": 1300, "k 1600": 1650, "s 1000": 1000,
-    "g 650 gs": 650, "cb 300": 300, "cb 500": 500, "cb 650": 650, "cb 1000r": 1000,
-    "cb twister": 300, "twister": 300, "cbr 250": 250, "cbr 500": 500, "cbr 600": 600,
-    "cbr 650": 650, "cbr 1000": 1000, "hornet 600": 600, "cb 600f": 600, "xre 190": 190,
-    "xre 300": 300, "xre 300 sahara": 300, "sahara 300": 300, "sahara 300 rally": 300,
-    "nxr 160": 160, "bros 160": 160, "cg 160": 160, "cg 160 titan": 160, "cg 160 fan": 160,
-    "cg 160 start": 160, "cg 160 titan s": 160, "cg 125": 125, "cg 125 fan ks": 125,
-    "biz 125": 125, "biz 125 es": 125, "biz 110": 110, "pop 110": 110, "pop 110i": 110,
-    "pcx 150": 150, "pcx 160": 160, "xj6": 600, "mt 03": 300, "mt 07": 690, "mt 09": 890,
-    "mt 01": 1700, "fazer 150": 150, "fazer 250": 250, "ys 250": 250, "factor 125": 125,
-    "factor 150": 150, "xtz 150": 150, "xtz 250": 250, "xtz 250 tenere": 250, "tenere 250": 250,
-    "lander 250": 250, "yzf r3": 300, "yzf r-3": 300, "r15": 150, "r1": 1000,
-    "nmax 160": 160, "xmax 250": 250, "gs500": 500, "bandit 600": 600, "bandit 650": 650,
-    "bandit 1250": 1250, "gsx 650f": 650, "gsx-s 750": 750, "gsx-s 1000": 1000,
-    "hayabusa": 1350, "gixxer 250": 250, "burgman 125": 125, "z300": 300, "z400": 400,
-    "z650": 650, "z750": 750, "z800": 800, "z900": 950, "z1000": 1000, "ninja 300": 300,
-    "ninja 400": 400, "ninja 650": 650, "ninja 1000": 1050, "ninja zx-10r": 1000,
-    "er6n": 650, "versys 300": 300, "versys 650": 650, "xt 660": 660, "meteor 350": 350,
-    "classic 350": 350, "hunter 350": 350, "himalayan": 400, "interceptor 650": 650,
-    "continental gt 650": 650, "tiger 800": 800, "tiger 900": 900, "street triple": 750,
-    "speed triple": 1050, "bonneville": 900, "trident 660": 660, "monster 797": 800,
-    "monster 821": 820, "monster 937": 940, "panigale v2": 950, "panigale v4": 1100,
-    "iron 883": 883, "forty eight": 1200, "sportster s": 1250, "fat bob": 1140,
-    "road glide": 2150, "street glide": 1750, "next 300": 300, "commander 250": 250,
-    "dafra citycom 300": 300, "dr 160": 160, "dr 160 s": 160, "t350 x": 350
-}
+JSON_FILE = "data_desmobja.json"
 
 # =================== UTILS =======================
 
-def normalizar_modelo(modelo):
-    if not modelo:
-        return ""
-    modelo_norm = unidecode(modelo).lower()
-    modelo_norm = re.sub(r'[^a-z0-9]', '', modelo_norm)
-    return modelo_norm
-
-def inferir_categoria(modelo):
-    if not modelo:
-        return None
-    modelo_norm = normalizar_modelo(modelo)
-    for mapeado, categoria in MAPEAMENTO_CATEGORIAS.items():
-        mapeado_norm = normalizar_modelo(mapeado)
-        if mapeado_norm in modelo_norm:
-            return categoria
-    return None
-
-def inferir_cilindrada(modelo):
-    if not modelo:
-        return None
-    modelo_norm = normalizar_modelo(modelo)
-    for mapeado, cilindrada in MAPEAMENTO_CILINDRADAS.items():
-        mapeado_norm = normalizar_modelo(mapeado)
-        if mapeado_norm in modelo_norm:
-            return cilindrada
-    return None
-
-def converter_preco_xml(valor_str):
-    if not valor_str:
-        return None
+def converter_preco(preco_str):
+    """Converte preço do XML para inteiro"""
+    if not preco_str:
+        return 0
     try:
-        valor = str(valor_str).replace("R$", "").replace(".", "").replace(",", ".").strip()
-        return float(valor)
-    except ValueError:
-        return None
+        valor = float(str(preco_str))
+        # Se o valor parece estar em centavos (muito alto), divide por 100
+        if valor > 1000000:
+            valor = valor / 100
+        return int(valor)  # Retorna como inteiro
+    except (ValueError, TypeError):
+        return 0
 
-# Para cada estrutura de XML: estoque/veiculo OU ADS/AD
-def extrair_veiculos(data_dict):
-    # Compatibiliza para qualquer estrutura
-    veic = None
-    if "estoque" in data_dict and "veiculo" in data_dict["estoque"]:
-        veic = data_dict["estoque"]["veiculo"]
-    elif "ADS" in data_dict and "AD" in data_dict["ADS"]:
-        veic = data_dict["ADS"]["AD"]
-    else:
-        return []
+def converter_km(km_str):
+    """Converte KM para inteiro"""
+    if not km_str:
+        return 0
+    try:
+        return int(str(km_str))
+    except (ValueError, TypeError):
+        return 0
 
-    # Garante lista
-    if isinstance(veic, dict):
-        veic = [veic]
-    return veic
+# =================== FETCHER SIMPLES =======================
 
-def extrair_fotos(v):
-    # Caso estoque/veiculo (motos Dominato)
-    if "fotos" in v and v["fotos"]:
-        fotos_foto = v["fotos"].get("foto")
-        if not fotos_foto:
-            return []
-        if isinstance(fotos_foto, dict):
-            fotos_foto = [fotos_foto]
-        return [
-            img["url"].split("?")[0]
-            for img in fotos_foto
-            if isinstance(img, dict) and "url" in img
-        ]
-    # Caso ADS/AD (exemplo XML com IMAGE_URL)
-    if "IMAGES" in v:
-        image_url = v.get("IMAGES", {}).get("IMAGE_URL")
-        if not image_url:
-            return []
-        if isinstance(image_url, list):
-            return image_url
-        return [image_url]
-    return []
-
-# =================== FETCHER MULTI-XML =======================
-
-def get_xml_urls():
-    urls = []
-    for var, val in os.environ.items():
-        if var.startswith("XML_URL") and val:
-            urls.append(val)
-    if "XML_URL" in os.environ and os.environ["XML_URL"] not in urls:
-        urls.append(os.environ["XML_URL"])
-    return urls
+def get_xml_url():
+    """Pega URL do XML da variável de ambiente"""
+    return os.environ.get("XML_URL_DESMOBJA", "https://n8n-n8n-start.xnvwew.easypanel.host/webhook/xml")
 
 def fetch_and_convert_xml():
     try:
-        XML_URLS = get_xml_urls()
-        if not XML_URLS:
-            raise ValueError("Nenhuma variável XML_URL definida")
-
-        parsed_vehicles = []
-
-        for XML_URL in XML_URLS:
-            response = requests.get(XML_URL)
-            data_dict = xmltodict.parse(response.content)
-            veiculos = extrair_veiculos(data_dict)
-            for v in veiculos:
-                try:
-                    # Detecta formato Dominato (estoque/veiculo) ou ADS/AD e adapta
-                    if "idveiculo" in v: # Dominato motos (estoque/veiculo)
-                        parsed = {
-                            "id": v.get("idveiculo"),
-                            "tipo": v.get("tipoveiculo"),
-                            "marca": v.get("marca"),
-                            "modelo": v.get("modelo"),
-                            "categoria": inferir_categoria(v.get("modelo")),
-                            "cilindrada": inferir_cilindrada(v.get("modelo")),
-                            "ano": v.get("anomodelo"),
-                            "km": v.get("quilometragem"),
-                            "cor": v.get("cor"),
-                            "combustivel": v.get("combustivel"),
-                            "cambio": v.get("cambio"),
-                            "portas": v.get("numeroportas"),
-                            "preco": converter_preco_xml(v.get("preco")),
-                            "opcionais": v.get("opcionais").get("opcional") if v.get("opcionais") else None,
-                            "fotos": extrair_fotos(v)
-                        }
-                    else: # ADS/AD padrão webmotors e afins
-                        parsed = {
-                            "id": v.get("ID"),
-                            "tipo": v.get("CATEGORY"),
-                            "titulo": v.get("TITLE"),
-                            "marca": v.get("MAKE"),
-                            "modelo": v.get("MODEL"),
-                            "categoria": v.get("BODY_TYPE"),
-                            "cilindrada": inferir_cilindrada(v.get("MODEL")),
-                            "ano": v.get("YEAR"),
-                            "ano_fabricacao": v.get("FABRIC_YEAR"),
-                            "km": v.get("MILEAGE"),
-                            "cor": v.get("COLOR"),
-                            "combustivel": v.get("FUEL"),
-                            "cambio": v.get("GEAR"),
-                            "motor": v.get("MOTOR"),
-                            "portas": v.get("DOORS"),
-                            "preco": float(str(v.get("PRICE", "0")).replace(",", "").strip() or 0),
-                            "opcionais": v.get("ACCESSORIES"),
-                            "fotos": extrair_fotos(v)
-                        }
-                    parsed_vehicles.append(parsed)
-                except Exception as e:
-                    print(f"[ERRO ao converter veículo ID {v.get('ID', v.get('idveiculo', ''))}] {e}")
-
+        XML_URL = get_xml_url()
+        print(f"[INFO] Buscando XML de: {XML_URL}")
+        
+        response = requests.get(XML_URL, timeout=30)
+        response.raise_for_status()
+        
+        # Parse do XML
+        root = ET.fromstring(response.content)
+        
+        veiculos = []
+        
+        # Extrair cada veículo do XML
+        for veiculo in root.findall('.//veiculo'):
+            veiculo_data = {}
+            
+            # Extrair todos os campos diretamente
+            for campo in veiculo:
+                tag_name = campo.tag
+                tag_value = campo.text if campo.text else ""
+                
+                # Conversões específicas
+                if tag_name == "preco":
+                    veiculo_data[tag_name] = converter_preco(tag_value)
+                elif tag_name == "km":
+                    veiculo_data[tag_name] = converter_km(tag_value)
+                elif tag_name == "sequencia":
+                    veiculo_data[tag_name] = int(tag_value) if tag_value.isdigit() else tag_value
+                else:
+                    veiculo_data[tag_name] = tag_value
+            
+            veiculos.append(veiculo_data)
+        
+        # Extrair metadados do estoque
+        data_geracao = root.find('dataGeracao')
+        total_veiculos = root.find('totalVeiculos')
+        
         data_dict = {
-            "veiculos": parsed_vehicles,
+            "veiculos": veiculos,
+            "total_veiculos": int(total_veiculos.text) if total_veiculos is not None else len(veiculos),
+            "data_geracao": data_geracao.text if data_geracao is not None else None,
             "_updated_at": datetime.now().isoformat()
         }
-
+        
+        # Salvar JSON
         with open(JSON_FILE, "w", encoding="utf-8") as f:
             json.dump(data_dict, f, ensure_ascii=False, indent=2)
-
-        print("[OK] Dados atualizados com sucesso.")
+        
+        print(f"[OK] {len(veiculos)} veículos convertidos com sucesso.")
+        print(f"[OK] Arquivo salvo: {JSON_FILE}")
+        
         return data_dict
-
-    except Exception as e:
-        print(f"[ERRO] Falha ao converter XML: {e}")
+        
+    except requests.exceptions.RequestException as e:
+        print(f"[ERRO] Falha ao buscar XML: {e}")
         return {}
+    except ET.ParseError as e:
+        print(f"[ERRO] Falha ao fazer parse do XML: {e}")
+        return {}
+    except Exception as e:
+        print(f"[ERRO] Falha geral: {e}")
+        return {}
+
+# =================== MAIN =======================
+
+if __name__ == "__main__":
+    result = fetch_and_convert_xml()
+    if result:
+        print(f"[SUCCESS] Processados {len(result.get('veiculos', []))} veículos")
+    else:
+        print("[FAIL] Nenhum veículo processado")
