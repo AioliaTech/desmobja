@@ -1,215 +1,267 @@
-import requests
 import xml.etree.ElementTree as ET
 import json
-import os
-from typing import List, Dict, Any
+from datetime import datetime
+from typing import Dict, List, Optional
 
-def get_xml_urls():
-    """Pega URLs do XML das variáveis de ambiente"""
-    urls = []
+class XMLFetcher:
+    def __init__(self, xml_file_path: str):
+        """
+        Inicializa o XMLFetcher com o caminho do arquivo XML
+        
+        Args:
+            xml_file_path (str): Caminho para o arquivo XML
+        """
+        self.xml_file_path = xml_file_path
+        self.data = None
     
-    # Primeiro, pega XML_URL se existir
-    xml_url = os.environ.get("XML_URL")
-    if xml_url and xml_url.strip():
-        urls.append(xml_url.strip())
-        print(f"[DEBUG] Encontrou XML_URL: {xml_url.strip()}")
-    
-    # Depois, pega outras variáveis que começam com XML_URL
-    for var, val in os.environ.items():
-        if var.startswith("XML_URL") and var != "XML_URL" and val and val.strip():
-            clean_url = val.strip()
-            if clean_url not in urls:  # Evita duplicatas
-                urls.append(clean_url)
-                print(f"[DEBUG] Encontrou {var}: {clean_url}")
-    
-    print(f"[DEBUG] Total de URLs encontradas: {len(urls)}")
-    return urls
-
-def fetch_xml_from_url(url: str) -> str:
-    """Busca XML de uma URL específica"""
-    try:
-        print(f"[INFO] Buscando XML de: {url}")
+    def parse_xml(self) -> Dict:
+        """
+        Faz o parse do XML e converte para um dicionário Python
         
-        response = requests.get(url, timeout=30)
-        response.raise_for_status()
-        
-        xml_content = response.text
-        print(f"[INFO] XML obtido com sucesso: {len(xml_content)} caracteres")
-        
-        return xml_content
-        
-    except requests.exceptions.RequestException as e:
-        print(f"[ERRO] Falha ao buscar XML de {url}: {e}")
-        return None
-
-def parse_xml_to_json(xml_content: str) -> Dict[str, Any]:
-    """Converte XML para formato JSON"""
-    try:
-        # Parse do XML
-        root = ET.fromstring(xml_content)
-        
-        # Verifica se é o formato esperado
-        if root.tag != 'estoque':
-            print(f"[ERRO] Formato XML inesperado. Tag raiz: {root.tag}")
-            return {"veiculos": []}
-        
-        # Pega informações do cabeçalho
-        data_geracao = root.findtext('dataGeracao', '')
-        total_veiculos = root.findtext('totalVeiculos', '0')
-        
-        print(f"[INFO] Data geração: {data_geracao}")
-        print(f"[INFO] Total veículos no XML: {total_veiculos}")
-        
-        veiculos = []
-        
-        # Processa cada veículo
-        veiculos_xml = root.find('veiculos')
-        if veiculos_xml is not None:
-            for veiculo_xml in veiculos_xml.findall('veiculo'):
-                veiculo = {}
-                
-                # Extrai todos os campos do veículo
-                for child in veiculo_xml:
-                    tag = child.tag
-                    text = child.text or ""
-                    
-                    # Remove CDATA se presente
-                    if text.startswith('<![CDATA[') and text.endswith(']]>'):
-                        text = text[9:-3]
-                    
-                    veiculo[tag] = text.strip()
-                
-                # Converte tipos quando necessário
-                if 'sequencia' in veiculo:
-                    try:
-                        veiculo['sequencia'] = int(veiculo['sequencia'])
-                    except ValueError:
-                        pass
-                
-                if 'km' in veiculo and veiculo['km']:
-                    try:
-                        # Remove pontos e vírgulas se houver
-                        km_clean = veiculo['km'].replace('.', '').replace(',', '')
-                        veiculo['km'] = int(km_clean)
-                    except ValueError:
-                        pass
-                
-                # Adiciona campos padrão se não existirem
-                if 'placa' not in veiculo:
-                    veiculo['placa'] = ''
-                if 'modelo' not in veiculo:
-                    veiculo['modelo'] = veiculo.get('veiculo', '')
-                if 'valorIdealVenda' not in veiculo:
-                    veiculo['valorIdealVenda'] = ''
-                
-                veiculos.append(veiculo)
-        
-        print(f"[INFO] Processados {len(veiculos)} veículos do XML")
-        
-        # Log dos primeiros veículos para debug
-        if veiculos:
-            primeiro = veiculos[0]
-            print(f"[DEBUG] Primeiro veículo: {primeiro.get('placa', 'N/A')} - {primeiro.get('modelo', primeiro.get('veiculo', 'N/A'))}")
-            print(f"[DEBUG] Campos disponíveis: {list(primeiro.keys())}")
-        
-        return {
-            "veiculos": veiculos,
-            "total": len(veiculos),
-            "data_atualizacao": data_geracao,
-            "total_xml": total_veiculos,
-            "fonte": "pipefy_xml"
-        }
-        
-    except ET.ParseError as e:
-        print(f"[ERRO] Erro ao fazer parse do XML: {e}")
-        print(f"[DEBUG] Primeiros 500 caracteres do XML: {xml_content[:500]}")
-        return {"veiculos": []}
-    except Exception as e:
-        print(f"[ERRO] Erro inesperado ao processar XML: {e}")
-        return {"veiculos": []}
-
-def fetch_and_convert_xml():
-    """Função principal que busca XMLs e converte para JSON"""
-    try:
-        # Pega as URLs configuradas
-        urls = get_xml_urls()
-        
-        if not urls:
-            print("[ERRO] Nenhuma URL de XML configurada")
-            return
-        
-        print(f"[INFO] URLs encontradas: {urls}")
-        
-        all_vehicles = []
-        successful_fetches = 0
-        
-        # Processa cada URL individualmente
-        for url in urls:
-            # Garante que url é string, não lista
-            if isinstance(url, list):
-                print(f"[ERRO] URL inválida (lista): {url}")
-                continue
-                
-            url_str = str(url).strip()
-            print(f"[INFO] Processando: {url_str}")
+        Returns:
+            Dict: Dados do estoque em formato de dicionário
+        """
+        try:
+            # Carrega e faz parse do XML
+            tree = ET.parse(self.xml_file_path)
+            root = tree.getroot()
             
-            xml_content = fetch_xml_from_url(url_str)
-            if xml_content:
-                data = parse_xml_to_json(xml_content)
-                vehicles = data.get("veiculos", [])
-                
-                if vehicles:
-                    all_vehicles.extend(vehicles)
-                    successful_fetches += 1
-                    print(f"[INFO] {len(vehicles)} veículos adicionados de {url_str}")
-                else:
-                    print(f"[AVISO] Nenhum veículo encontrado em {url_str}")
-            else:
-                print(f"[ERRO] Falha ao obter XML de {url_str}")
-        
-        # Salva os dados no arquivo JSON
-        if all_vehicles:
-            output_data = {
-                "veiculos": all_vehicles,
-                "total": len(all_vehicles),
-                "fontes_processadas": successful_fetches,
-                "total_fontes": len(urls),
-                "ultima_atualizacao": None
+            # Extrai informações gerais do estoque
+            estoque_data = {
+                'dataGeracao': self._get_element_text(root, 'dataGeracao'),
+                'totalVeiculos': self._get_element_text(root, 'totalVeiculos', int),
+                'veiculos': []
             }
             
-            # Pega data de geração do primeiro XML se disponível
-            if urls and successful_fetches > 0:
-                try:
-                    xml_content = fetch_xml_from_url(urls[0])
-                    if xml_content:
-                        root = ET.fromstring(xml_content)
-                        data_geracao = root.findtext('dataGeracao', '')
-                        if data_geracao:
-                            output_data["ultima_atualizacao"] = data_geracao
-                except:
-                    pass
+            # Processa cada veículo
+            veiculos_element = root.find('veiculos')
+            if veiculos_element is not None:
+                for veiculo in veiculos_element.findall('veiculo'):
+                    veiculo_data = self._parse_veiculo(veiculo)
+                    estoque_data['veiculos'].append(veiculo_data)
             
-            # Salva no arquivo
-            with open("data.json", "w", encoding="utf-8") as f:
-                json.dump(output_data, f, ensure_ascii=False, indent=2)
+            self.data = estoque_data
+            return estoque_data
             
-            print(f"[SUCESSO] {len(all_vehicles)} veículos salvos em data.json")
-            print(f"[INFO] Fontes processadas: {successful_fetches}/{len(urls)}")
-            
-        else:
-            print("[ERRO] Nenhum veículo foi carregado de nenhuma fonte")
-            # Cria arquivo vazio para evitar erros
-            with open("data.json", "w", encoding="utf-8") as f:
-                json.dump({"veiculos": [], "total": 0}, f)
+        except ET.ParseError as e:
+            raise ValueError(f"Erro ao fazer parse do XML: {e}")
+        except FileNotFoundError:
+            raise FileNotFoundError(f"Arquivo XML não encontrado: {self.xml_file_path}")
+        except Exception as e:
+            raise Exception(f"Erro inesperado ao processar XML: {e}")
     
-    except Exception as e:
-        print(f"[ERRO] Falha geral: {e}")
-        # Cria arquivo vazio em caso de erro
-        try:
-            with open("data.json", "w", encoding="utf-8") as f:
-                json.dump({"veiculos": [], "total": 0}, f)
-        except:
-            pass
+    def _parse_veiculo(self, veiculo_element: ET.Element) -> Dict:
+        """
+        Processa um elemento veículo individual
+        
+        Args:
+            veiculo_element (ET.Element): Elemento XML do veículo
+            
+        Returns:
+            Dict: Dados do veículo
+        """
+        veiculo_data = {
+            'sequencia': self._get_element_text(veiculo_element, 'sequencia', int),
+            'placa': self._get_element_text(veiculo_element, 'placa'),
+            'modelo': self._get_element_text(veiculo_element, 'modelo'),
+            'cor': self._get_element_text(veiculo_element, 'cor'),
+            'ano': self._get_element_text(veiculo_element, 'ano'),
+            'km': self._get_element_text(veiculo_element, 'km', int),
+            'preco': self._get_element_text(veiculo_element, 'preco', int),
+            'linkMaterialDivulgacao': self._get_element_text(veiculo_element, 'linkMaterialDivulgacao'),
+            'dataEntrada': self._get_element_text(veiculo_element, 'dataEntrada'),
+            'checklistPdf': self._get_element_text(veiculo_element, 'checklistPdf')
+        }
+        
+        # Adiciona campos derivados para facilitar análises
+        veiculo_data['precoFormatado'] = self._format_price(veiculo_data['preco'])
+        veiculo_data['anoFabricacao'], veiculo_data['anoModelo'] = self._parse_ano(veiculo_data['ano'])
+        veiculo_data['temMaterialDivulgacao'] = bool(veiculo_data['linkMaterialDivulgacao'])
+        veiculo_data['temChecklistPdf'] = bool(veiculo_data['checklistPdf'])
+        
+        return veiculo_data
+    
+    def _get_element_text(self, parent: ET.Element, tag: str, convert_type: type = str) -> Optional:
+        """
+        Extrai texto de um elemento XML com conversão de tipo opcional
+        
+        Args:
+            parent (ET.Element): Elemento pai
+            tag (str): Nome da tag
+            convert_type (type): Tipo para conversão (str, int, float, etc.)
+            
+        Returns:
+            Valor convertido ou None se vazio
+        """
+        element = parent.find(tag)
+        if element is not None and element.text:
+            text = element.text.strip()
+            if text:
+                if convert_type == int:
+                    return int(text)
+                elif convert_type == float:
+                    return float(text)
+                return text
+        return None
+    
+    def _format_price(self, preco: Optional[int]) -> Optional[str]:
+        """
+        Formata o preço para formato brasileiro
+        
+        Args:
+            preco (Optional[int]): Preço em centavos
+            
+        Returns:
+            Optional[str]: Preço formatado ou None
+        """
+        if preco is None:
+            return None
+        
+        # Converte centavos para reais
+        valor_reais = preco / 100
+        return f"R$ {valor_reais:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+    
+    def _parse_ano(self, ano: Optional[str]) -> tuple:
+        """
+        Separa ano de fabricação e modelo
+        
+        Args:
+            ano (Optional[str]): String no formato "YYYY/YYYY"
+            
+        Returns:
+            tuple: (ano_fabricacao, ano_modelo)
+        """
+        if not ano:
+            return None, None
+        
+        if '/' in ano:
+            partes = ano.split('/')
+            return partes[0], partes[1]
+        
+        return ano, ano
+    
+    def to_json(self, indent: int = 2) -> str:
+        """
+        Converte os dados para JSON
+        
+        Args:
+            indent (int): Indentação para formatação
+            
+        Returns:
+            str: JSON formatado
+        """
+        if self.data is None:
+            raise ValueError("Execute parse_xml() primeiro")
+        
+        return json.dumps(self.data, indent=indent, ensure_ascii=False)
+    
+    def save_json(self, output_file: str, indent: int = 2):
+        """
+        Salva os dados em um arquivo JSON
+        
+        Args:
+            output_file (str): Caminho do arquivo de saída
+            indent (int): Indentação para formatação
+        """
+        if self.data is None:
+            raise ValueError("Execute parse_xml() primeiro")
+        
+        with open(output_file, 'w', encoding='utf-8') as f:
+            json.dump(self.data, f, indent=indent, ensure_ascii=False)
+    
+    def get_summary(self) -> Dict:
+        """
+        Retorna um resumo dos dados do estoque
+        
+        Returns:
+            Dict: Resumo estatístico
+        """
+        if self.data is None:
+            raise ValueError("Execute parse_xml() primeiro")
+        
+        veiculos = self.data['veiculos']
+        
+        # Contadores
+        total_veiculos = len(veiculos)
+        veiculos_com_preco = sum(1 for v in veiculos if v['preco'] is not None)
+        veiculos_com_material = sum(1 for v in veiculos if v['temMaterialDivulgacao'])
+        veiculos_com_checklist = sum(1 for v in veiculos if v['temChecklistPdf'])
+        
+        # Análise por cor
+        cores = {}
+        for veiculo in veiculos:
+            cor = veiculo['cor']
+            cores[cor] = cores.get(cor, 0) + 1
+        
+        # Análise por modelo (marca)
+        modelos = {}
+        for veiculo in veiculos:
+            modelo = veiculo['modelo']
+            if modelo:
+                # Extrai a primeira palavra como "marca"
+                marca = modelo.split()[0]
+                modelos[marca] = modelos.get(marca, 0) + 1
+        
+        # Preços (apenas veículos com preço)
+        precos = [v['preco'] for v in veiculos if v['preco'] is not None]
+        
+        return {
+            'totalVeiculos': total_veiculos,
+            'veiculosComPreco': veiculos_com_preco,
+            'veiculosComMaterial': veiculos_com_material,
+            'veiculosComChecklist': veiculos_com_checklist,
+            'distribuicaoPorCor': cores,
+            'distribuicaoPorMarca': modelos,
+            'estatisticasPreco': {
+                'menorPreco': min(precos) if precos else None,
+                'maiorPreco': max(precos) if precos else None,
+                'precoMedio': sum(precos) / len(precos) if precos else None,
+                'totalVeiculosComPreco': len(precos)
+            }
+        }
 
+# Exemplo de uso
 if __name__ == "__main__":
-    fetch_and_convert_xml()
+    # Inicializa o fetcher
+    fetcher = XMLFetcher('estoque.xml')
+    
+    try:
+        # Faz o parse do XML
+        print("Fazendo parse do XML...")
+        data = fetcher.parse_xml()
+        
+        # Exibe resumo
+        print("\n=== RESUMO DO ESTOQUE ===")
+        summary = fetcher.get_summary()
+        print(f"Total de veículos: {summary['totalVeiculos']}")
+        print(f"Veículos com preço: {summary['veiculosComPreco']}")
+        print(f"Veículos com material: {summary['veiculosComMaterial']}")
+        print(f"Veículos com checklist: {summary['veiculosComChecklist']}")
+        
+        print("\nDistribuição por cor:")
+        for cor, qtd in summary['distribuicaoPorCor'].items():
+            print(f"  {cor}: {qtd}")
+        
+        print("\nDistribuição por marca:")
+        for marca, qtd in summary['distribuicaoPorMarca'].items():
+            print(f"  {marca}: {qtd}")
+        
+        # Salva em JSON
+        print("\nSalvando em JSON...")
+        fetcher.save_json('estoque.json')
+        
+        # Exemplo de acesso aos dados
+        print("\n=== EXEMPLOS DE VEÍCULOS ===")
+        for i, veiculo in enumerate(data['veiculos'][:3]):  # Primeiros 3 veículos
+            print(f"\nVeículo {i+1}:")
+            print(f"  Placa: {veiculo['placa']}")
+            print(f"  Modelo: {veiculo['modelo']}")
+            print(f"  Cor: {veiculo['cor']}")
+            print(f"  Ano: {veiculo['ano']}")
+            print(f"  KM: {veiculo['km']:,}".replace(',', '.') if veiculo['km'] else 'N/A')
+            print(f"  Preço: {veiculo['precoFormatado'] or 'Não informado'}")
+        
+        print(f"\nArquivo JSON salvo como 'estoque.json'")
+        
+    except Exception as e:
+        print(f"Erro: {e}")
