@@ -69,7 +69,26 @@ def normalize_color(color_input: str) -> Optional[str]:
     
     return color_input.upper()  # Se não encontrar, retorna em maiúsculo
 
-def fuzzy_match_model(search_term: str, model: str, threshold: int = FUZZY_THRESHOLD) -> bool:
+def fuzzy_match_year(search_term: str, year_field: str) -> bool:
+    """
+    Verifica se o ano corresponde ao termo de busca (ex: 2020 encontra 2020/2021)
+    
+    Args:
+        search_term (str): Ano buscado (ex: "2020")
+        year_field (str): Campo ano do veículo (ex: "2020/2021")
+        
+    Returns:
+        bool: True se encontrar o ano
+    """
+    if not search_term or not year_field:
+        return True if not search_term else False
+    
+    # Busca direta
+    if search_term in year_field:
+        return True
+    
+    # Busca fuzzy para casos com variações
+    return fuzz.partial_ratio(search_term, year_field) >= FUZZY_THRESHOLD
     """
     Verifica se o modelo corresponde ao termo de busca usando fuzzy matching
     
@@ -202,28 +221,24 @@ async def root():
 
 @app.get("/vehicles")
 async def get_vehicles(
-    sequencia: Optional[int] = Query(None, description="Sequência do veículo"),
     placa: Optional[str] = Query(None, description="Placa do veículo"),
-    modelo: Optional[str] = Query(None, description="Modelo (busca fuzzy com 85% similaridade)"),
-    cor: Optional[str] = Query(None, description="Cor (aceita variações: branco/branca, vermelho/vermelha)"),
-    ano_fabricacao: Optional[str] = Query(None, description="Ano de fabricação"),
-    ano_modelo: Optional[str] = Query(None, description="Ano do modelo"),
-    km_min: Optional[int] = Query(None, description="Quilometragem mínima"),
-    km_max: Optional[int] = Query(None, description="Quilometragem máxima"),
-    preco_min: Optional[int] = Query(None, description="Preço mínimo (em centavos)"),
-    preco_max: Optional[int] = Query(None, description="Preço máximo (em centavos)"),
-    tem_preco: Optional[bool] = Query(None, description="Filtrar apenas veículos com preço"),
-    tem_material: Optional[bool] = Query(None, description="Filtrar apenas veículos com material de divulgação"),
-    tem_checklist: Optional[bool] = Query(None, description="Filtrar apenas veículos com checklist PDF"),
+    modelo: Optional[str] = Query(None, description="Modelo (busca fuzzy)"),
+    cor: Optional[str] = Query(None, description="Cor (aceita variações)"),
+    ano: Optional[str] = Query(None, description="Ano (busca em 2020/2021 se buscar 2020)"),
+    km_max: Optional[int] = Query(None, description="KM máximo (cap de km)"),
+    valor_max: Optional[int] = Query(None, description="Valor máximo em reais (cap de preço)"),
     limit: Optional[int] = Query(50, description="Limite de resultados"),
     offset: Optional[int] = Query(0, description="Offset para paginação")
 ):
     """
-    Busca veículos com filtros avançados
+    Busca veículos com filtros
     
-    - **modelo**: Busca fuzzy com 85% de similaridade
-    - **cor**: Aceita variações (branco/branca, vermelho/vermelha, etc.)
-    - **precos**: Em centavos (ex: 5000000 = R$ 50.000,00)
+    - **placa**: Busca parcial na placa
+    - **modelo**: Busca fuzzy no modelo
+    - **cor**: Aceita variações (branco/branca, etc.)
+    - **ano**: Busca fuzzy (2020 encontra 2020/2021)
+    - **km_max**: Limite máximo de quilometragem
+    - **valor_max**: Limite máximo de preço em reais
     """
     if vehicle_data["data"] is None:
         raise HTTPException(status_code=503, detail="Dados não disponíveis")
@@ -234,46 +249,36 @@ async def get_vehicles(
     # Normaliza cor se fornecida
     normalized_color = normalize_color(cor) if cor else None
     
+    # Converte valor_max para centavos se fornecido
+    valor_max_centavos = valor_max * 100 if valor_max else None
+    
     for vehicle in vehicles:
-        # Aplica filtros
-        if sequencia is not None and vehicle.get("sequencia") != sequencia:
-            continue
+        # Filtro por placa (busca parcial)
+        if placa and vehicle.get("placa"):
+            if placa.upper() not in vehicle["placa"].upper():
+                continue
         
-        if placa and vehicle.get("placa") and placa.upper() not in vehicle["placa"].upper():
-            continue
-        
+        # Filtro por modelo (fuzzy)
         if modelo and not fuzzy_match_model(modelo, vehicle.get("modelo", "")):
             continue
         
+        # Filtro por cor (normalizada)
         if normalized_color and vehicle.get("cor") != normalized_color:
             continue
         
-        if ano_fabricacao and vehicle.get("anoFabricacao") != ano_fabricacao:
+        # Filtro por ano (fuzzy para 2020/2021)
+        if ano and not fuzzy_match_year(ano, vehicle.get("ano", "")):
             continue
         
-        if ano_modelo and vehicle.get("anoModelo") != ano_modelo:
-            continue
+        # Filtro por KM máximo
+        if km_max is not None and vehicle.get("km") is not None:
+            if vehicle["km"] > km_max:
+                continue
         
-        if km_min is not None and (vehicle.get("km") is None or vehicle["km"] < km_min):
-            continue
-        
-        if km_max is not None and (vehicle.get("km") is None or vehicle["km"] > km_max):
-            continue
-        
-        if preco_min is not None and (vehicle.get("preco") is None or vehicle["preco"] < preco_min):
-            continue
-        
-        if preco_max is not None and (vehicle.get("preco") is None or vehicle["preco"] > preco_max):
-            continue
-        
-        if tem_preco is not None and bool(vehicle.get("preco")) != tem_preco:
-            continue
-        
-        if tem_material is not None and vehicle.get("temMaterialDivulgacao") != tem_material:
-            continue
-        
-        if tem_checklist is not None and vehicle.get("temChecklistPdf") != tem_checklist:
-            continue
+        # Filtro por valor máximo (cap de preço)
+        if valor_max_centavos is not None and vehicle.get("preco") is not None:
+            if vehicle["preco"] > valor_max_centavos:
+                continue
         
         filtered_vehicles.append(vehicle)
     
@@ -285,21 +290,7 @@ async def get_vehicles(
         "total": total,
         "limit": limit,
         "offset": offset,
-        "vehicles": paginated_vehicles,
-        "filters_applied": {
-            "sequencia": sequencia,
-            "placa": placa,
-            "modelo": modelo,
-            "cor_original": cor,
-            "cor_normalizada": normalized_color,
-            "ano_fabricacao": ano_fabricacao,
-            "ano_modelo": ano_modelo,
-            "km_range": f"{km_min}-{km_max}" if km_min or km_max else None,
-            "preco_range": f"{preco_min}-{preco_max}" if preco_min or preco_max else None,
-            "tem_preco": tem_preco,
-            "tem_material": tem_material,
-            "tem_checklist": tem_checklist
-        }
+        "vehicles": paginated_vehicles
     }
 
 @app.get("/vehicles/{sequencia}")
