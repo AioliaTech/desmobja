@@ -6,7 +6,7 @@ from typing import Dict, List, Optional
 import logging
 
 # Configuração da URL do XML - MODIFIQUE AQUI
-XML_URL = "https://sua-url-aqui.com/estoque.xml"  # 🔧 SUBSTITUA PELA SUA URL
+XML_URL = "https://n8n-n8n-start.xnvwew.easypanel.host/webhook/a58e26e0-1bfa-466f-8c05-121fb4de596c"  # 🔧 SUBSTITUA PELA SUA URL
 
 class XMLFetcher:
     def __init__(self, xml_source: str = None, is_url: bool = None):
