@@ -15,8 +15,6 @@ from xml_fetcher import XMLFetcher
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-from xml_fetcher import XMLFetcher
-
 # Configurações
 JSON_FILE_PATH = "estoque.json"
 UPDATE_INTERVAL_HOURS = 2
@@ -49,15 +47,7 @@ COLOR_MAPPING = {
 }
 
 def normalize_color(color_input: str) -> Optional[str]:
-    """
-    Normaliza a cor de entrada para a cor padrão do estoque
-    
-    Args:
-        color_input (str): Cor fornecida pelo usuário
-        
-    Returns:
-        Optional[str]: Cor normalizada ou None se não encontrada
-    """
+    """Normaliza a cor de entrada para a cor padrão do estoque"""
     if not color_input:
         return None
     
@@ -65,31 +55,64 @@ def normalize_color(color_input: str) -> Optional[str]:
     
     for standard_color, variations in COLOR_MAPPING.items():
         if color_lower in [v.lower() for v in variations]:
-            return standard_color.upper()  # Retorna no formato do XML (maiúsculo)
+            return standard_color.upper()
     
-    return color_input.upper()  # Se não encontrar, retorna em maiúsculo
+    return color_input.upper()
+
+def fuzzy_match_model(search_term: str, model: str, threshold: int = FUZZY_THRESHOLD) -> bool:
+    """Verifica se o modelo corresponde ao termo de busca usando fuzzy matching"""
+    if not search_term or not model:
+        return True if not search_term else False
+    
+    def normalize_string(s):
+        return re.sub(r'[^a-z0-9\s]', '', s.lower()).strip()
+    
+    search_normalized = normalize_string(search_term)
+    model_normalized = normalize_string(model)
+    
+    # 1. Busca exata normalizada
+    if search_normalized in model_normalized:
+        return True
+    
+    # 2. Busca parcial com strings normalizadas
+    if fuzz.partial_ratio(search_normalized, model_normalized) >= threshold:
+        return True
+    
+    # 3. Busca com ordenação de tokens
+    if fuzz.token_sort_ratio(search_normalized, model_normalized) >= threshold:
+        return True
+    
+    # 4. Busca em palavras individuais (mais flexível)
+    search_words = search_normalized.split()
+    model_words = model_normalized.split()
+    
+    for search_word in search_words:
+        for model_word in model_words:
+            if search_word == model_word:
+                return True
+            if len(search_word) >= 2 and fuzz.ratio(search_word, model_word) >= 70:
+                return True
+            if len(search_word) >= 2 and search_word in model_word:
+                return True
+    
+    # 5. Último recurso: busca muito flexível para casos como s-10 vs s10
+    search_clean = ''.join(c for c in search_normalized if c.isalnum())
+    model_clean = ''.join(c for c in model_normalized if c.isalnum())
+    
+    if len(search_clean) >= 2 and search_clean in model_clean:
+        return True
+    
+    return False
 
 def fuzzy_match_year(search_term: str, year_field: str) -> bool:
-    """
-    Verifica se o ano corresponde ao termo de busca (ex: 2020 encontra 2020/2021)
-    
-    Args:
-        search_term (str): Ano buscado (ex: "2020")
-        year_field (str): Campo ano do veículo (ex: "2020/2021")
-        
-    Returns:
-        bool: True se encontrar o ano
-    """
+    """Verifica se o ano corresponde ao termo de busca"""
     if not search_term or not year_field:
         return True if not search_term else False
     
-    # Busca direta
     if search_term in year_field:
         return True
     
-    # Busca fuzzy para casos com variações
     return fuzz.partial_ratio(search_term, year_field) >= FUZZY_THRESHOLD
-
 
 async def load_vehicle_data():
     """Carrega dados dos veículos do JSON"""
@@ -114,14 +137,10 @@ async def update_data_from_xml():
     try:
         logger.info("Iniciando atualização dos dados...")
         
-        # Usa XMLFetcher com configuração padrão (da URL configurada)
         fetcher = XMLFetcher()
-        
-        # Processa o XML
         data = fetcher.parse_xml()
         fetcher.save_json(JSON_FILE_PATH)
         
-        # Recarrega os dados
         await load_vehicle_data()
         
         logger.info(f"Dados atualizados com sucesso: {len(data.get('veiculos', []))} veículos")
@@ -136,24 +155,21 @@ async def scheduler():
     while True:
         try:
             await update_data_from_xml()
-            await asyncio.sleep(UPDATE_INTERVAL_HOURS * 3600)  # 2 horas em segundos
+            await asyncio.sleep(UPDATE_INTERVAL_HOURS * 3600)
         except Exception as e:
             logger.error(f"Erro no scheduler: {e}")
-            await asyncio.sleep(300)  # Aguarda 5 minutos antes de tentar novamente
+            await asyncio.sleep(300)
 
 @app.on_event("startup")
 async def startup_event():
     """Inicialização da aplicação"""
     global scheduler_task
     
-    # Carrega dados iniciais
     await load_vehicle_data()
     
-    # Se não tiver dados, tenta atualizar do XML
     if vehicle_data["data"] is None:
         await update_data_from_xml()
     
-    # Inicia o scheduler
     scheduler_task = asyncio.create_task(scheduler())
     logger.info("Aplicação iniciada e scheduler ativo")
 
@@ -193,16 +209,7 @@ async def get_vehicles(
     limit: Optional[int] = Query(50, description="Limite de resultados"),
     offset: Optional[int] = Query(0, description="Offset para paginação")
 ):
-    """
-    Busca veículos com filtros
-    
-    - **placa**: Busca parcial na placa
-    - **modelo**: Busca fuzzy no modelo
-    - **cor**: Aceita variações (branco/branca, etc.)
-    - **ano**: Busca fuzzy (2020 encontra 2020/2021)
-    - **kmmax**: Limite máximo de quilometragem
-    - **valormax**: Limite máximo de preço em reais
-    """
+    """Busca veículos com filtros"""
     try:
         if vehicle_data["data"] is None:
             raise HTTPException(status_code=503, detail="Dados não disponíveis")
@@ -218,7 +225,6 @@ async def get_vehicles(
         
         filtered_vehicles = []
         
-        # Normaliza cor se fornecida
         normalized_color = None
         if cor:
             try:
@@ -228,31 +234,23 @@ async def get_vehicles(
         
         for vehicle in vehicles:
             try:
-                # Filtro por placa (busca parcial)
+                # Filtro por placa
                 if placa and vehicle.get("placa"):
                     if placa.upper() not in vehicle["placa"].upper():
                         continue
                 
-                # Filtro por modelo (fuzzy)
+                # Filtro por modelo
                 if modelo:
-                    try:
-                        if not fuzzy_match_model(modelo, vehicle.get("modelo", "")):
-                            continue
-                    except Exception as e:
-                        logger.warning(f"Erro no fuzzy match para modelo '{modelo}': {e}")
+                    if not fuzzy_match_model(modelo, vehicle.get("modelo", "")):
                         continue
                 
-                # Filtro por cor (normalizada)
+                # Filtro por cor
                 if normalized_color and vehicle.get("cor") != normalized_color:
                     continue
                 
-                # Filtro por ano (fuzzy para 2020/2021)
+                # Filtro por ano
                 if ano:
-                    try:
-                        if not fuzzy_match_year(ano, vehicle.get("ano", "")):
-                            continue
-                    except Exception as e:
-                        logger.warning(f"Erro no fuzzy match para ano '{ano}': {e}")
+                    if not fuzzy_match_year(ano, vehicle.get("ano", "")):
                         continue
                 
                 # Filtro por KM máximo
@@ -260,7 +258,7 @@ async def get_vehicles(
                     if vehicle["km"] > kmmax:
                         continue
                 
-                # Filtro por valor máximo (preço já está em reais)
+                # Filtro por valor máximo
                 if valormax is not None and vehicle.get("preco") is not None:
                     if vehicle["preco"] > valormax:
                         continue
@@ -271,7 +269,6 @@ async def get_vehicles(
                 logger.error(f"Erro ao processar veículo {vehicle.get('sequencia', 'unknown')}: {e}")
                 continue
         
-        # Aplica paginação
         total = len(filtered_vehicles)
         paginated_vehicles = filtered_vehicles[offset:offset + limit]
         
@@ -312,23 +309,24 @@ async def get_vehicle_by_sequencia(sequencia: int):
 @app.get("/summary")
 async def get_summary():
     """Retorna resumo estatístico do estoque"""
-    if vehicle_data["data"] is None:
-        raise HTTPException(status_code=503, detail="Dados não disponíveis")
-    
     try:
-        # Usa o XMLFetcher para gerar o resumo
-        fetcher = XMLFetcher(XML_FILE_PATH)
-        fetcher.data = vehicle_data["data"]  # Usa dados já carregados
+        if vehicle_data["data"] is None:
+            raise HTTPException(status_code=503, detail="Dados não disponíveis")
+        
+        fetcher = XMLFetcher()
+        fetcher.data = vehicle_data["data"]
         summary = fetcher.get_summary()
         
-        # Adiciona informações de atualização
         summary["data_geracao"] = vehicle_data["data"].get("dataGeracao")
         summary["ultima_atualizacao"] = vehicle_data["last_update"].isoformat() if vehicle_data["last_update"] else None
         
         return summary
         
+    except HTTPException:
+        raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Erro ao gerar resumo: {e}")
+        logger.error(f"Erro ao gerar resumo: {e}")
+        raise HTTPException(status_code=500, detail=f"Erro ao gerar resumo: {str(e)}")
 
 @app.post("/update")
 async def force_update(background_tasks: BackgroundTasks):
@@ -356,6 +354,9 @@ async def get_config():
         "json_output": JSON_FILE_PATH,
         "note": "Configure a URL no arquivo xml_fetcher.py"
     }
+
+@app.get("/health")
+async def health_check():
     """Verifica saúde da aplicação"""
     from xml_fetcher import XML_URL
     
