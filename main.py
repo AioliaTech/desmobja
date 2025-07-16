@@ -6,7 +6,7 @@ import asyncio
 from datetime import datetime, timedelta
 import logging
 from pathlib import Path
-from fuzzywuzzy import fuzz
+from rapidfuzz import fuzz
 import re
 import uvicorn
 from xml_fetcher import XMLFetcher
@@ -83,17 +83,28 @@ def fuzzy_match_model(search_term: str, model: str, threshold: int = FUZZY_THRES
     if not search_term or not model:
         return True if not search_term else False
     
-    # Busca fuzzy no modelo completo
-    if fuzz.partial_ratio(search_term.lower(), model.lower()) >= threshold:
+    search_lower = search_term.lower()
+    model_lower = model.lower()
+    
+    # 1. Busca parcial (melhor para substrings)
+    if fuzz.partial_ratio(search_lower, model_lower) >= threshold:
         return True
     
-    # Busca fuzzy em palavras individuais
-    search_words = search_term.lower().split()
-    model_words = model.lower().split()
+    # 2. Busca com ordenação de tokens (melhor para palavras fora de ordem)
+    if fuzz.token_sort_ratio(search_lower, model_lower) >= threshold:
+        return True
+    
+    # 3. Busca em palavras individuais
+    search_words = search_lower.split()
+    model_words = model_lower.split()
     
     for search_word in search_words:
         for model_word in model_words:
+            # Ratio simples para palavras exatas
             if fuzz.ratio(search_word, model_word) >= threshold:
+                return True
+            # Ratio parcial para substrings em palavras
+            if len(search_word) >= 3 and fuzz.partial_ratio(search_word, model_word) >= threshold:
                 return True
     
     return False
