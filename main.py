@@ -89,45 +89,7 @@ def fuzzy_match_year(search_term: str, year_field: str) -> bool:
     
     # Busca fuzzy para casos com variações
     return fuzz.partial_ratio(search_term, year_field) >= FUZZY_THRESHOLD
-    """
-    Verifica se o modelo corresponde ao termo de busca usando fuzzy matching
-    
-    Args:
-        search_term (str): Termo de busca
-        model (str): Modelo do veículo
-        threshold (int): Limiar de similaridade (0-100)
-        
-    Returns:
-        bool: True se a similaridade for >= threshold
-    """
-    if not search_term or not model:
-        return True if not search_term else False
-    
-    search_lower = search_term.lower()
-    model_lower = model.lower()
-    
-    # 1. Busca parcial (melhor para substrings)
-    if fuzz.partial_ratio(search_lower, model_lower) >= threshold:
-        return True
-    
-    # 2. Busca com ordenação de tokens (melhor para palavras fora de ordem)
-    if fuzz.token_sort_ratio(search_lower, model_lower) >= threshold:
-        return True
-    
-    # 3. Busca em palavras individuais
-    search_words = search_lower.split()
-    model_words = model_lower.split()
-    
-    for search_word in search_words:
-        for model_word in model_words:
-            # Ratio simples para palavras exatas
-            if fuzz.ratio(search_word, model_word) >= threshold:
-                return True
-            # Ratio parcial para substrings em palavras
-            if len(search_word) >= 3 and fuzz.partial_ratio(search_word, model_word) >= threshold:
-                return True
-    
-    return False
+
 
 async def load_vehicle_data():
     """Carrega dados dos veículos do JSON"""
@@ -215,7 +177,8 @@ async def root():
             "vehicles": "/vehicles - Lista veículos com filtros",
             "vehicle": "/vehicles/{sequencia} - Busca por sequência",
             "summary": "/summary - Resumo do estoque",
-            "update": "/update - Força atualização dos dados"
+            "update": "/update - Força atualização dos dados",
+            "parametros": "placa, modelo, cor, ano, kmmax, valormax"
         }
     }
 
@@ -225,8 +188,8 @@ async def get_vehicles(
     modelo: Optional[str] = Query(None, description="Modelo (busca fuzzy)"),
     cor: Optional[str] = Query(None, description="Cor (aceita variações)"),
     ano: Optional[str] = Query(None, description="Ano (busca em 2020/2021 se buscar 2020)"),
-    km_max: Optional[int] = Query(None, description="KM máximo (cap de km)"),
-    valor_max: Optional[int] = Query(None, description="Valor máximo em reais (cap de preço)"),
+    kmmax: Optional[int] = Query(None, description="KM máximo (cap de km)"),
+    valormax: Optional[int] = Query(None, description="Valor máximo em reais (cap de preço)"),
     limit: Optional[int] = Query(50, description="Limite de resultados"),
     offset: Optional[int] = Query(0, description="Offset para paginação")
 ):
@@ -237,75 +200,114 @@ async def get_vehicles(
     - **modelo**: Busca fuzzy no modelo
     - **cor**: Aceita variações (branco/branca, etc.)
     - **ano**: Busca fuzzy (2020 encontra 2020/2021)
-    - **km_max**: Limite máximo de quilometragem
-    - **valor_max**: Limite máximo de preço em reais
+    - **kmmax**: Limite máximo de quilometragem
+    - **valormax**: Limite máximo de preço em reais
     """
-    if vehicle_data["data"] is None:
-        raise HTTPException(status_code=503, detail="Dados não disponíveis")
-    
-    vehicles = vehicle_data["data"]["veiculos"]
-    filtered_vehicles = []
-    
-    # Normaliza cor se fornecida
-    normalized_color = normalize_color(cor) if cor else None
-    
-    # Converte valor_max para centavos se fornecido
-    valor_max_centavos = valor_max * 100 if valor_max else None
-    
-    for vehicle in vehicles:
-        # Filtro por placa (busca parcial)
-        if placa and vehicle.get("placa"):
-            if placa.upper() not in vehicle["placa"].upper():
+    try:
+        if vehicle_data["data"] is None:
+            raise HTTPException(status_code=503, detail="Dados não disponíveis")
+        
+        vehicles = vehicle_data["data"]["veiculos"]
+        if not vehicles:
+            return {
+                "total": 0,
+                "limit": limit,
+                "offset": offset,
+                "vehicles": []
+            }
+        
+        filtered_vehicles = []
+        
+        # Normaliza cor se fornecida
+        normalized_color = None
+        if cor:
+            try:
+                normalized_color = normalize_color(cor)
+            except Exception as e:
+                logger.warning(f"Erro ao normalizar cor '{cor}': {e}")
+        
+        for vehicle in vehicles:
+            try:
+                # Filtro por placa (busca parcial)
+                if placa and vehicle.get("placa"):
+                    if placa.upper() not in vehicle["placa"].upper():
+                        continue
+                
+                # Filtro por modelo (fuzzy)
+                if modelo:
+                    try:
+                        if not fuzzy_match_model(modelo, vehicle.get("modelo", "")):
+                            continue
+                    except Exception as e:
+                        logger.warning(f"Erro no fuzzy match para modelo '{modelo}': {e}")
+                        continue
+                
+                # Filtro por cor (normalizada)
+                if normalized_color and vehicle.get("cor") != normalized_color:
+                    continue
+                
+                # Filtro por ano (fuzzy para 2020/2021)
+                if ano:
+                    try:
+                        if not fuzzy_match_year(ano, vehicle.get("ano", "")):
+                            continue
+                    except Exception as e:
+                        logger.warning(f"Erro no fuzzy match para ano '{ano}': {e}")
+                        continue
+                
+                # Filtro por KM máximo
+                if kmmax is not None and vehicle.get("km") is not None:
+                    if vehicle["km"] > kmmax:
+                        continue
+                
+                # Filtro por valor máximo (preço já está em reais)
+                if valormax is not None and vehicle.get("preco") is not None:
+                    if vehicle["preco"] > valormax:
+                        continue
+                
+                filtered_vehicles.append(vehicle)
+                
+            except Exception as e:
+                logger.error(f"Erro ao processar veículo {vehicle.get('sequencia', 'unknown')}: {e}")
                 continue
         
-        # Filtro por modelo (fuzzy)
-        if modelo and not fuzzy_match_model(modelo, vehicle.get("modelo", "")):
-            continue
+        # Aplica paginação
+        total = len(filtered_vehicles)
+        paginated_vehicles = filtered_vehicles[offset:offset + limit]
         
-        # Filtro por cor (normalizada)
-        if normalized_color and vehicle.get("cor") != normalized_color:
-            continue
+        return {
+            "total": total,
+            "limit": limit,
+            "offset": offset,
+            "vehicles": paginated_vehicles
+        }
         
-        # Filtro por ano (fuzzy para 2020/2021)
-        if ano and not fuzzy_match_year(ano, vehicle.get("ano", "")):
-            continue
-        
-        # Filtro por KM máximo
-        if km_max is not None and vehicle.get("km") is not None:
-            if vehicle["km"] > km_max:
-                continue
-        
-        # Filtro por valor máximo (cap de preço)
-        if valor_max_centavos is not None and vehicle.get("preco") is not None:
-            if vehicle["preco"] > valor_max_centavos:
-                continue
-        
-        filtered_vehicles.append(vehicle)
-    
-    # Aplica paginação
-    total = len(filtered_vehicles)
-    paginated_vehicles = filtered_vehicles[offset:offset + limit]
-    
-    return {
-        "total": total,
-        "limit": limit,
-        "offset": offset,
-        "vehicles": paginated_vehicles
-    }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Erro interno na busca de veículos: {e}")
+        raise HTTPException(status_code=500, detail=f"Erro interno do servidor: {str(e)}")
 
 @app.get("/vehicles/{sequencia}")
 async def get_vehicle_by_sequencia(sequencia: int):
     """Busca um veículo específico pela sequência"""
-    if vehicle_data["data"] is None:
-        raise HTTPException(status_code=503, detail="Dados não disponíveis")
-    
-    vehicles = vehicle_data["data"]["veiculos"]
-    
-    for vehicle in vehicles:
-        if vehicle.get("sequencia") == sequencia:
-            return vehicle
-    
-    raise HTTPException(status_code=404, detail="Veículo não encontrado")
+    try:
+        if vehicle_data["data"] is None:
+            raise HTTPException(status_code=503, detail="Dados não disponíveis")
+        
+        vehicles = vehicle_data["data"]["veiculos"]
+        
+        for vehicle in vehicles:
+            if vehicle.get("sequencia") == sequencia:
+                return vehicle
+        
+        raise HTTPException(status_code=404, detail="Veículo não encontrado")
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Erro ao buscar veículo {sequencia}: {e}")
+        raise HTTPException(status_code=500, detail=f"Erro interno do servidor: {str(e)}")
 
 @app.get("/summary")
 async def get_summary():
