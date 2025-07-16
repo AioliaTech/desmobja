@@ -32,7 +32,7 @@ def converter_km(km_str):
 
 # =================== FETCHER SIMPLES =======================
 
-def get_xml_urls():
+def get_xml_url():
     urls = []
     # Primeira parte: não vai encontrar nada que comece com XML_URL (além da própria XML_URL)
     for var, val in os.environ.items():
