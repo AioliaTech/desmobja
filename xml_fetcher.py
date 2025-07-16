@@ -34,12 +34,16 @@ def converter_km(km_str):
 
 def get_xml_urls():
     urls = []
+    # Primeira parte: não vai encontrar nada que comece com XML_URL (além da própria XML_URL)
     for var, val in os.environ.items():
         if var.startswith("XML_URL") and val:
-            urls.append(val)
+            urls.append(val)  # Vai adicionar sua URL aqui
+    
+    # Segunda parte: como XML_URL já foi adicionada acima, não adiciona novamente
     if "XML_URL" in os.environ and os.environ["XML_URL"] not in urls:
         urls.append(os.environ["XML_URL"])
-    return urls
+    
+    return urls  # Retorna ['https://n8n-n8n-start.xnvwew.easypanel.host/webhook/a58e26e0-1bfa-466f-8c05-121fb4de596c']
 
 def fetch_and_convert_xml():
     try:
