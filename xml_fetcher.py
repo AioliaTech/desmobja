@@ -2,118 +2,214 @@ import requests
 import xml.etree.ElementTree as ET
 import json
 import os
-from datetime import datetime
+from typing import List, Dict, Any
 
-JSON_FILE = "data_desmobja.json"
-
-# =================== UTILS =======================
-
-def converter_preco(preco_str):
-    """Converte preço do XML para inteiro"""
-    if not preco_str:
-        return 0
-    try:
-        valor = float(str(preco_str))
-        # Se o valor parece estar em centavos (muito alto), divide por 100
-        if valor > 1000000:
-            valor = valor / 100
-        return int(valor)  # Retorna como inteiro
-    except (ValueError, TypeError):
-        return 0
-
-def converter_km(km_str):
-    """Converte KM para inteiro"""
-    if not km_str:
-        return 0
-    try:
-        return int(str(km_str))
-    except (ValueError, TypeError):
-        return 0
-
-# =================== FETCHER SIMPLES =======================
-
-def get_xml_url():
+def get_xml_urls():
+    """Pega URLs do XML das variáveis de ambiente"""
     urls = []
-    # Primeira parte: não vai encontrar nada que comece com XML_URL (além da própria XML_URL)
+    
+    # Primeiro, pega XML_URL se existir
+    xml_url = os.environ.get("XML_URL")
+    if xml_url and xml_url.strip():
+        urls.append(xml_url.strip())
+        print(f"[DEBUG] Encontrou XML_URL: {xml_url.strip()}")
+    
+    # Depois, pega outras variáveis que começam com XML_URL
     for var, val in os.environ.items():
-        if var.startswith("XML_URL") and val:
-            urls.append(val)  # Vai adicionar sua URL aqui
+        if var.startswith("XML_URL") and var != "XML_URL" and val and val.strip():
+            clean_url = val.strip()
+            if clean_url not in urls:  # Evita duplicatas
+                urls.append(clean_url)
+                print(f"[DEBUG] Encontrou {var}: {clean_url}")
     
-    # Segunda parte: como XML_URL já foi adicionada acima, não adiciona novamente
-    if "XML_URL" in os.environ and os.environ["XML_URL"] not in urls:
-        urls.append(os.environ["XML_URL"])
-    
-    return urls  # Retorna ['https://n8n-n8n-start.xnvwew.easypanel.host/webhook/a58e26e0-1bfa-466f-8c05-121fb4de596c']
+    print(f"[DEBUG] Total de URLs encontradas: {len(urls)}")
+    return urls
 
-def fetch_and_convert_xml():
+def fetch_xml_from_url(url: str) -> str:
+    """Busca XML de uma URL específica"""
     try:
-        XML_URL = get_xml_url()
-        print(f"[INFO] Buscando XML de: {XML_URL}")
+        print(f"[INFO] Buscando XML de: {url}")
         
-        response = requests.get(XML_URL, timeout=30)
+        response = requests.get(url, timeout=30)
         response.raise_for_status()
         
+        xml_content = response.text
+        print(f"[INFO] XML obtido com sucesso: {len(xml_content)} caracteres")
+        
+        return xml_content
+        
+    except requests.exceptions.RequestException as e:
+        print(f"[ERRO] Falha ao buscar XML de {url}: {e}")
+        return None
+
+def parse_xml_to_json(xml_content: str) -> Dict[str, Any]:
+    """Converte XML para formato JSON"""
+    try:
         # Parse do XML
-        root = ET.fromstring(response.content)
+        root = ET.fromstring(xml_content)
+        
+        # Verifica se é o formato esperado
+        if root.tag != 'estoque':
+            print(f"[ERRO] Formato XML inesperado. Tag raiz: {root.tag}")
+            return {"veiculos": []}
+        
+        # Pega informações do cabeçalho
+        data_geracao = root.findtext('dataGeracao', '')
+        total_veiculos = root.findtext('totalVeiculos', '0')
+        
+        print(f"[INFO] Data geração: {data_geracao}")
+        print(f"[INFO] Total veículos no XML: {total_veiculos}")
         
         veiculos = []
         
-        # Extrair cada veículo do XML
-        for veiculo in root.findall('.//veiculo'):
-            veiculo_data = {}
-            
-            # Extrair todos os campos diretamente
-            for campo in veiculo:
-                tag_name = campo.tag
-                tag_value = campo.text if campo.text else ""
+        # Processa cada veículo
+        veiculos_xml = root.find('veiculos')
+        if veiculos_xml is not None:
+            for veiculo_xml in veiculos_xml.findall('veiculo'):
+                veiculo = {}
                 
-                # Conversões específicas
-                if tag_name == "preco":
-                    veiculo_data[tag_name] = converter_preco(tag_value)
-                elif tag_name == "km":
-                    veiculo_data[tag_name] = converter_km(tag_value)
-                elif tag_name == "sequencia":
-                    veiculo_data[tag_name] = int(tag_value) if tag_value.isdigit() else tag_value
-                else:
-                    veiculo_data[tag_name] = tag_value
-            
-            veiculos.append(veiculo_data)
+                # Extrai todos os campos do veículo
+                for child in veiculo_xml:
+                    tag = child.tag
+                    text = child.text or ""
+                    
+                    # Remove CDATA se presente
+                    if text.startswith('<![CDATA[') and text.endswith(']]>'):
+                        text = text[9:-3]
+                    
+                    veiculo[tag] = text.strip()
+                
+                # Converte tipos quando necessário
+                if 'sequencia' in veiculo:
+                    try:
+                        veiculo['sequencia'] = int(veiculo['sequencia'])
+                    except ValueError:
+                        pass
+                
+                if 'km' in veiculo and veiculo['km']:
+                    try:
+                        # Remove pontos e vírgulas se houver
+                        km_clean = veiculo['km'].replace('.', '').replace(',', '')
+                        veiculo['km'] = int(km_clean)
+                    except ValueError:
+                        pass
+                
+                # Adiciona campos padrão se não existirem
+                if 'placa' not in veiculo:
+                    veiculo['placa'] = ''
+                if 'modelo' not in veiculo:
+                    veiculo['modelo'] = veiculo.get('veiculo', '')
+                if 'valorIdealVenda' not in veiculo:
+                    veiculo['valorIdealVenda'] = ''
+                
+                veiculos.append(veiculo)
         
-        # Extrair metadados do estoque
-        data_geracao = root.find('dataGeracao')
-        total_veiculos = root.find('totalVeiculos')
+        print(f"[INFO] Processados {len(veiculos)} veículos do XML")
         
-        data_dict = {
+        # Log dos primeiros veículos para debug
+        if veiculos:
+            primeiro = veiculos[0]
+            print(f"[DEBUG] Primeiro veículo: {primeiro.get('placa', 'N/A')} - {primeiro.get('modelo', primeiro.get('veiculo', 'N/A'))}")
+            print(f"[DEBUG] Campos disponíveis: {list(primeiro.keys())}")
+        
+        return {
             "veiculos": veiculos,
-            "total_veiculos": int(total_veiculos.text) if total_veiculos is not None else len(veiculos),
-            "data_geracao": data_geracao.text if data_geracao is not None else None,
-            "_updated_at": datetime.now().isoformat()
+            "total": len(veiculos),
+            "data_atualizacao": data_geracao,
+            "total_xml": total_veiculos,
+            "fonte": "pipefy_xml"
         }
         
-        # Salvar JSON
-        with open(JSON_FILE, "w", encoding="utf-8") as f:
-            json.dump(data_dict, f, ensure_ascii=False, indent=2)
-        
-        print(f"[OK] {len(veiculos)} veículos convertidos com sucesso.")
-        print(f"[OK] Arquivo salvo: {JSON_FILE}")
-        
-        return data_dict
-        
-    except requests.exceptions.RequestException as e:
-        print(f"[ERRO] Falha ao buscar XML: {e}")
-        return {}
     except ET.ParseError as e:
-        print(f"[ERRO] Falha ao fazer parse do XML: {e}")
-        return {}
+        print(f"[ERRO] Erro ao fazer parse do XML: {e}")
+        print(f"[DEBUG] Primeiros 500 caracteres do XML: {xml_content[:500]}")
+        return {"veiculos": []}
+    except Exception as e:
+        print(f"[ERRO] Erro inesperado ao processar XML: {e}")
+        return {"veiculos": []}
+
+def fetch_and_convert_xml():
+    """Função principal que busca XMLs e converte para JSON"""
+    try:
+        # Pega as URLs configuradas
+        urls = get_xml_urls()
+        
+        if not urls:
+            print("[ERRO] Nenhuma URL de XML configurada")
+            return
+        
+        print(f"[INFO] URLs encontradas: {urls}")
+        
+        all_vehicles = []
+        successful_fetches = 0
+        
+        # Processa cada URL individualmente
+        for url in urls:
+            # Garante que url é string, não lista
+            if isinstance(url, list):
+                print(f"[ERRO] URL inválida (lista): {url}")
+                continue
+                
+            url_str = str(url).strip()
+            print(f"[INFO] Processando: {url_str}")
+            
+            xml_content = fetch_xml_from_url(url_str)
+            if xml_content:
+                data = parse_xml_to_json(xml_content)
+                vehicles = data.get("veiculos", [])
+                
+                if vehicles:
+                    all_vehicles.extend(vehicles)
+                    successful_fetches += 1
+                    print(f"[INFO] {len(vehicles)} veículos adicionados de {url_str}")
+                else:
+                    print(f"[AVISO] Nenhum veículo encontrado em {url_str}")
+            else:
+                print(f"[ERRO] Falha ao obter XML de {url_str}")
+        
+        # Salva os dados no arquivo JSON
+        if all_vehicles:
+            output_data = {
+                "veiculos": all_vehicles,
+                "total": len(all_vehicles),
+                "fontes_processadas": successful_fetches,
+                "total_fontes": len(urls),
+                "ultima_atualizacao": None
+            }
+            
+            # Pega data de geração do primeiro XML se disponível
+            if urls and successful_fetches > 0:
+                try:
+                    xml_content = fetch_xml_from_url(urls[0])
+                    if xml_content:
+                        root = ET.fromstring(xml_content)
+                        data_geracao = root.findtext('dataGeracao', '')
+                        if data_geracao:
+                            output_data["ultima_atualizacao"] = data_geracao
+                except:
+                    pass
+            
+            # Salva no arquivo
+            with open("data.json", "w", encoding="utf-8") as f:
+                json.dump(output_data, f, ensure_ascii=False, indent=2)
+            
+            print(f"[SUCESSO] {len(all_vehicles)} veículos salvos em data.json")
+            print(f"[INFO] Fontes processadas: {successful_fetches}/{len(urls)}")
+            
+        else:
+            print("[ERRO] Nenhum veículo foi carregado de nenhuma fonte")
+            # Cria arquivo vazio para evitar erros
+            with open("data.json", "w", encoding="utf-8") as f:
+                json.dump({"veiculos": [], "total": 0}, f)
+    
     except Exception as e:
         print(f"[ERRO] Falha geral: {e}")
-        return {}
-
-# =================== MAIN =======================
+        # Cria arquivo vazio em caso de erro
+        try:
+            with open("data.json", "w", encoding="utf-8") as f:
+                json.dump({"veiculos": [], "total": 0}, f)
+        except:
+            pass
 
 if __name__ == "__main__":
-    result = fetch_and_convert_xml()
-    if result:
-        print(f"[SUCCESS] Processados {len(result.get('veiculos', []))} veículos")
-    else:
-        print("[FAIL] Nenhum veículo processado")
+    fetch_and_convert_xml()
