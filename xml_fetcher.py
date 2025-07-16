@@ -1,369 +1,417 @@
-import xml.etree.ElementTree as ET
+from fastapi import FastAPI, HTTPException, Query, BackgroundTasks
+from fastapi.responses import JSONResponse
+from typing import List, Optional, Dict, Any
 import json
-import requests
-from datetime import datetime
-from typing import Dict, List, Optional
+import asyncio
+from datetime import datetime, timedelta
 import logging
+from pathlib import Path
+from rapidfuzz import fuzz
+import re
+import uvicorn
+from xml_fetcher import XMLFetcher
 
-# Configuração da URL do XML - MODIFIQUE AQUI
-XML_URL = "https://n8n-n8n-start.xnvwew.easypanel.host/webhook/a58e26e0-1bfa-466f-8c05-121fb4de596c"  # 🔧 SUBSTITUA PELA SUA URL
+# Configuração de logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
-class XMLFetcher:
-    def __init__(self, xml_source: str = None, is_url: bool = None):
-        """
-        Inicializa o XMLFetcher
-        
-        Args:
-            xml_source (str): Caminho para o arquivo XML ou URL (opcional, usa XML_URL se None)
-            is_url (bool): Se True, xml_source é tratado como URL (auto-detecta se None)
-        """
-        # Se não especificado, usa a URL configurada
-        if xml_source is None:
-            xml_source = XML_URL
-            is_url = True
-        
-        # Auto-detecta se é URL
-        if is_url is None:
-            is_url = xml_source.startswith(('http://', 'https://'))
-        
-        self.xml_source = xml_source
-        self.is_url = is_url
-        self.data = None
-        self.logger = logging.getLogger(__name__)
-        self._last_xml_content = None
+from xml_fetcher import XMLFetcher
+
+# Configurações
+JSON_FILE_PATH = "estoque.json"
+UPDATE_INTERVAL_HOURS = 2
+FUZZY_THRESHOLD = 85
+
+app = FastAPI(
+    title="API Estoque de Veículos",
+    description="API para consulta de estoque de veículos com busca fuzzy e filtros avançados",
+    version="1.0.0"
+)
+
+# Variáveis globais para armazenar dados
+vehicle_data = {"data": None, "last_update": None}
+scheduler_task = None
+
+# Mapeamento de cores flexível
+COLOR_MAPPING = {
+    "branco": ["branco", "branca", "white"],
+    "preto": ["preto", "preta", "black"],
+    "vermelho": ["vermelho", "vermelha", "red"],
+    "azul": ["azul", "blue"],
+    "prata": ["prata", "prata", "silver", "cinza", "gray"],
+    "amarelo": ["amarelo", "amarela", "yellow"],
+    "verde": ["verde", "green"],
+    "bege": ["bege", "creme", "cream"],
+    "dourado": ["dourado", "dourada", "gold"],
+    "rosa": ["rosa", "pink"],
+    "roxo": ["roxo", "roxa", "purple"],
+    "marrom": ["marrom", "brown"]
+}
+
+def normalize_color(color_input: str) -> Optional[str]:
+    """
+    Normaliza a cor de entrada para a cor padrão do estoque
     
-    def download_xml(self, timeout: int = 30) -> str:
-        """
-        Baixa o XML de uma URL
+    Args:
+        color_input (str): Cor fornecida pelo usuário
         
-        Args:
-            timeout (int): Timeout em segundos
-            
-        Returns:
-            str: Conteúdo XML como string
-        """
-        try:
-            self.logger.info(f"Baixando XML de: {self.xml_source}")
-            
-            headers = {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-            }
-            
-            response = requests.get(self.xml_source, timeout=timeout, headers=headers)
-            response.raise_for_status()
-            
-            # Verifica se é XML válido
-            if 'xml' not in response.headers.get('content-type', '').lower():
-                # Tenta verificar se o conteúdo parece XML
-                content = response.text.strip()
-                if not content.startswith('<?xml') and not content.startswith('<'):
-                    raise ValueError("Resposta não parece ser XML válido")
-            
-            self.logger.info(f"XML baixado com sucesso: {len(response.text)} caracteres")
-            
-            # Armazena conteúdo para backup
-            self._last_xml_content = response.text
-            
-            return response.text
-            
-        except requests.exceptions.RequestException as e:
-            raise Exception(f"Erro ao baixar XML: {e}")
-        except Exception as e:
-            raise Exception(f"Erro inesperado ao baixar XML: {e}")
-    
-    def parse_xml(self) -> Dict:
-        """
-        Faz o parse do XML e converte para um dicionário Python
-        
-        Returns:
-            Dict: Dados do estoque em formato de dicionário
-        """
-        try:
-            if self.is_url:
-                # Baixa XML da URL
-                xml_content = self.download_xml()
-                root = ET.fromstring(xml_content)
-            else:
-                # Carrega XML do arquivo local
-                tree = ET.parse(self.xml_source)
-                root = tree.getroot()
-            
-            # Extrai informações gerais do estoque
-            estoque_data = {
-                'dataGeracao': self._get_element_text(root, 'dataGeracao'),
-                'totalVeiculos': self._get_element_text(root, 'totalVeiculos', int),
-                'veiculos': [],
-                'fonte': self.xml_source,
-                'dataProcessamento': datetime.now().isoformat()
-            }
-            
-            # Processa cada veículo
-            veiculos_element = root.find('veiculos')
-            if veiculos_element is not None:
-                for veiculo in veiculos_element.findall('veiculo'):
-                    veiculo_data = self._parse_veiculo(veiculo)
-                    estoque_data['veiculos'].append(veiculo_data)
-            
-            self.data = estoque_data
-            self.logger.info(f"XML processado: {len(estoque_data['veiculos'])} veículos")
-            return estoque_data
-            
-        except ET.ParseError as e:
-            raise ValueError(f"Erro ao fazer parse do XML: {e}")
-        except FileNotFoundError:
-            raise FileNotFoundError(f"Arquivo XML não encontrado: {self.xml_source}")
-        except Exception as e:
-            raise Exception(f"Erro inesperado ao processar XML: {e}")
-    
-    def _parse_veiculo(self, veiculo_element: ET.Element) -> Dict:
-        """
-        Processa um elemento veículo individual
-        
-        Args:
-            veiculo_element (ET.Element): Elemento XML do veículo
-            
-        Returns:
-            Dict: Dados do veículo
-        """
-        veiculo_data = {
-            'sequencia': self._get_element_text(veiculo_element, 'sequencia', int),
-            'placa': self._get_element_text(veiculo_element, 'placa'),
-            'modelo': self._get_element_text(veiculo_element, 'modelo'),
-            'cor': self._get_element_text(veiculo_element, 'cor'),
-            'ano': self._get_element_text(veiculo_element, 'ano'),
-            'km': self._get_element_text(veiculo_element, 'km', int),
-            'preco': self._get_element_text(veiculo_element, 'preco', int),
-            'linkMaterialDivulgacao': self._get_element_text(veiculo_element, 'linkMaterialDivulgacao'),
-            'dataEntrada': self._get_element_text(veiculo_element, 'dataEntrada'),
-            'checklistPdf': self._get_element_text(veiculo_element, 'checklistPdf')
-        }
-        
-        return veiculo_data
-    
-    def _get_element_text(self, parent: ET.Element, tag: str, convert_type: type = str) -> Optional:
-        """
-        Extrai texto de um elemento XML com conversão de tipo opcional
-        
-        Args:
-            parent (ET.Element): Elemento pai
-            tag (str): Nome da tag
-            convert_type (type): Tipo para conversão (str, int, float, etc.)
-            
-        Returns:
-            Valor convertido ou None se vazio
-        """
-        element = parent.find(tag)
-        if element is not None and element.text:
-            text = element.text.strip()
-            if text:
-                if convert_type == int:
-                    return int(text)
-                elif convert_type == float:
-                    return float(text)
-                return text
+    Returns:
+        Optional[str]: Cor normalizada ou None se não encontrada
+    """
+    if not color_input:
         return None
     
-    def _format_price(self, preco: Optional[int]) -> Optional[str]:
-        """
-        Formata o preço para formato brasileiro
-        
-        Args:
-            preco (Optional[int]): Preço em centavos
-            
-        Returns:
-            Optional[str]: Preço formatado ou None
-        """
-        if preco is None:
-            return None
-        
-        # Converte centavos para reais (remove 2 zeros)
-        valor_reais = preco / 100
-        return f"R$ {valor_reais:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+    color_lower = color_input.lower().strip()
     
-    def _parse_ano(self, ano: Optional[str]) -> tuple:
-        """
-        Separa ano de fabricação e modelo
-        
-        Args:
-            ano (Optional[str]): String no formato "YYYY/YYYY"
-            
-        Returns:
-            tuple: (ano_fabricacao, ano_modelo)
-        """
-        if not ano:
-            return None, None
-        
-        if '/' in ano:
-            partes = ano.split('/')
-            return partes[0], partes[1]
-        
-        return ano, ano
+    for standard_color, variations in COLOR_MAPPING.items():
+        if color_lower in [v.lower() for v in variations]:
+            return standard_color.upper()  # Retorna no formato do XML (maiúsculo)
     
-    def to_json(self, indent: int = 2) -> str:
-        """
-        Converte os dados para JSON
-        
-        Args:
-            indent (int): Indentação para formatação
-            
-        Returns:
-            str: JSON formatado
-        """
-        if self.data is None:
-            raise ValueError("Execute parse_xml() primeiro")
-        
-        return json.dumps(self.data, indent=indent, ensure_ascii=False)
-    
-    def save_json(self, output_file: str, indent: int = 2):
-        """
-        Salva os dados em um arquivo JSON
-        
-        Args:
-            output_file (str): Caminho do arquivo de saída
-            indent (int): Indentação para formatação
-        """
-        if self.data is None:
-            raise ValueError("Execute parse_xml() primeiro")
-        
-        with open(output_file, 'w', encoding='utf-8') as f:
-            json.dump(self.data, f, indent=indent, ensure_ascii=False)
-    
-    @classmethod
-    def from_url(cls, url: str = None):
-        """
-        Método de conveniência para criar fetcher a partir de URL
-        
-        Args:
-            url (str): URL do XML (usa XML_URL se None)
-            
-        Returns:
-            XMLFetcher: Instância configurada para URL
-        """
-        return cls(url or XML_URL, is_url=True)
-    
-    @classmethod
-    def from_file(cls, file_path: str):
-        """
-        Método de conveniência para criar fetcher a partir de arquivo
-        
-        Args:
-            file_path (str): Caminho do arquivo XML
-            
-        Returns:
-            XMLFetcher: Instância configurada para arquivo
-        """
-        return cls(file_path, is_url=False)
-        """
-        Retorna um resumo dos dados do estoque
-        
-        Returns:
-            Dict: Resumo estatístico
-        """
-        if self.data is None:
-            raise ValueError("Execute parse_xml() primeiro")
-        
-        veiculos = self.data['veiculos']
-        
-        # Contadores
-        total_veiculos = len(veiculos)
-        veiculos_com_preco = sum(1 for v in veiculos if v['preco'] is not None)
-        veiculos_com_material = sum(1 for v in veiculos if v['temMaterialDivulgacao'])
-        veiculos_com_checklist = sum(1 for v in veiculos if v['temChecklistPdf'])
-        
-        # Análise por cor
-        cores = {}
-        for veiculo in veiculos:
-            cor = veiculo['cor']
-            cores[cor] = cores.get(cor, 0) + 1
-        
-        # Análise por modelo (marca)
-        modelos = {}
-        for veiculo in veiculos:
-            modelo = veiculo['modelo']
-            if modelo:
-                # Extrai a primeira palavra como "marca"
-                marca = modelo.split()[0]
-                modelos[marca] = modelos.get(marca, 0) + 1
-        
-        # Preços (apenas veículos com preço)
-        precos = [v['preco'] for v in veiculos if v['preco'] is not None]
-        
-        return {
-            'totalVeiculos': total_veiculos,
-            'veiculosComPreco': veiculos_com_preco,
-            'veiculosComMaterial': veiculos_com_material,
-            'veiculosComChecklist': veiculos_com_checklist,
-            'distribuicaoPorCor': cores,
-            'distribuicaoPorMarca': modelos,
-            'estatisticasPreco': {
-                'menorPreco': min(precos) if precos else None,
-                'maiorPreco': max(precos) if precos else None,
-                'precoMedio': sum(precos) / len(precos) if precos else None,
-                'totalVeiculosComPreco': len(precos)
-            }
-        }
+    return color_input.upper()  # Se não encontrar, retorna em maiúsculo
 
-# Exemplo de uso
-if __name__ == "__main__":
-    # Usando a URL configurada (padrão)
-    fetcher = XMLFetcher()  # Usa XML_URL automaticamente
+def fuzzy_match_year(search_term: str, year_field: str) -> bool:
+    """
+    Verifica se o ano corresponde ao termo de busca (ex: 2020 encontra 2020/2021)
     
-    # Ou especificando URL diferente
-    # fetcher = XMLFetcher("https://outra-url.com/estoque.xml")
+    Args:
+        search_term (str): Ano buscado (ex: "2020")
+        year_field (str): Campo ano do veículo (ex: "2020/2021")
+        
+    Returns:
+        bool: True se encontrar o ano
+    """
+    if not search_term or not year_field:
+        return True if not search_term else False
     
-    # Ou usando arquivo local
-    # fetcher = XMLFetcher.from_file('estoque_local.xml')
+    # Busca direta
+    if search_term in year_field:
+        return True
+    
+    # Busca fuzzy para casos com variações
+    return fuzz.partial_ratio(search_term, year_field) >= FUZZY_THRESHOLD
+    """
+    Verifica se o modelo corresponde ao termo de busca usando fuzzy matching
+    
+    Args:
+        search_term (str): Termo de busca
+        model (str): Modelo do veículo
+        threshold (int): Limiar de similaridade (0-100)
+        
+    Returns:
+        bool: True se a similaridade for >= threshold
+    """
+    if not search_term or not model:
+        return True if not search_term else False
+    
+    search_lower = search_term.lower()
+    model_lower = model.lower()
+    
+    # 1. Busca parcial (melhor para substrings)
+    if fuzz.partial_ratio(search_lower, model_lower) >= threshold:
+        return True
+    
+    # 2. Busca com ordenação de tokens (melhor para palavras fora de ordem)
+    if fuzz.token_sort_ratio(search_lower, model_lower) >= threshold:
+        return True
+    
+    # 3. Busca em palavras individuais
+    search_words = search_lower.split()
+    model_words = model_lower.split()
+    
+    for search_word in search_words:
+        for model_word in model_words:
+            # Ratio simples para palavras exatas
+            if fuzz.ratio(search_word, model_word) >= threshold:
+                return True
+            # Ratio parcial para substrings em palavras
+            if len(search_word) >= 3 and fuzz.partial_ratio(search_word, model_word) >= threshold:
+                return True
+    
+    return False
+
+async def load_vehicle_data():
+    """Carrega dados dos veículos do JSON"""
+    global vehicle_data
     
     try:
-        # Faz o parse do XML
-        print(f"Fonte: {fetcher.xml_source}")
-        print(f"Tipo: {'URL' if fetcher.is_url else 'Arquivo local'}")
-        print("Fazendo parse do XML...")
+        if Path(JSON_FILE_PATH).exists():
+            with open(JSON_FILE_PATH, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+                vehicle_data["data"] = data
+                vehicle_data["last_update"] = datetime.now()
+                logger.info(f"Dados carregados: {len(data.get('veiculos', []))} veículos")
+        else:
+            logger.warning(f"Arquivo {JSON_FILE_PATH} não encontrado")
+            vehicle_data["data"] = None
+    except Exception as e:
+        logger.error(f"Erro ao carregar dados: {e}")
+        vehicle_data["data"] = None
+
+async def update_data_from_xml():
+    """Atualiza os dados convertendo XML para JSON"""
+    try:
+        logger.info("Iniciando atualização dos dados...")
         
+        # Usa XMLFetcher com configuração padrão (da URL configurada)
+        fetcher = XMLFetcher()
+        
+        # Processa o XML
         data = fetcher.parse_xml()
+        fetcher.save_json(JSON_FILE_PATH)
         
-        # Exibe resumo
-        print("\n=== RESUMO DO ESTOQUE ===")
-        summary = fetcher.get_summary()
-        print(f"Total de veículos: {summary['totalVeiculos']}")
-        print(f"Veículos com preço: {summary['veiculosComPreco']}")
-        print(f"Veículos com material: {summary['veiculosComMaterial']}")
-        print(f"Veículos com checklist: {summary['veiculosComChecklist']}")
+        # Recarrega os dados
+        await load_vehicle_data()
         
-        print("\nDistribuição por cor:")
-        for cor, qtd in summary['distribuicaoPorCor'].items():
-            print(f"  {cor}: {qtd}")
-        
-        print("\nDistribuição por marca:")
-        for marca, qtd in summary['distribuicaoPorMarca'].items():
-            print(f"  {marca}: {qtd}")
-        
-        # Salva em JSON
-        print("\nSalvando em JSON...")
-        fetcher.save_json('estoque.json')
-        
-        # Exemplo de acesso aos dados
-        print("\n=== EXEMPLOS DE VEÍCULOS ===")
-        for i, veiculo in enumerate(data['veiculos'][:3]):  # Primeiros 3 veículos
-            print(f"\nVeículo {i+1}:")
-            print(f"  Placa: {veiculo['placa']}")
-            print(f"  Modelo: {veiculo['modelo']}")
-            print(f"  Cor: {veiculo['cor']}")
-            print(f"  Ano: {veiculo['ano']}")
-            print(f"  KM: {veiculo['km']:,}".replace(',', '.') if veiculo['km'] else 'N/A')
-            print(f"  Preço: {veiculo['precoFormatado'] or 'Não informado'}")
-        
-        print(f"\nArquivo JSON salvo como 'estoque.json'")
-        print(f"Fonte: {data['fonte']}")
-        print(f"Processado em: {data['dataProcessamento']}")
+        logger.info(f"Dados atualizados com sucesso: {len(data.get('veiculos', []))} veículos")
+        logger.info(f"Fonte: {fetcher.xml_source}")
         
     except Exception as e:
-        print(f"Erro: {e}")
+        logger.error(f"Erro ao atualizar dados: {e}")
+        logger.error(f"Verifique se a URL está configurada corretamente no xml_fetcher.py")
+
+async def scheduler():
+    """Scheduler para atualizar dados a cada 2 horas"""
+    while True:
+        try:
+            await update_data_from_xml()
+            await asyncio.sleep(UPDATE_INTERVAL_HOURS * 3600)  # 2 horas em segundos
+        except Exception as e:
+            logger.error(f"Erro no scheduler: {e}")
+            await asyncio.sleep(300)  # Aguarda 5 minutos antes de tentar novamente
+
+@app.on_event("startup")
+async def startup_event():
+    """Inicialização da aplicação"""
+    global scheduler_task
+    
+    # Carrega dados iniciais
+    await load_vehicle_data()
+    
+    # Se não tiver dados, tenta atualizar do XML
+    if vehicle_data["data"] is None:
+        await update_data_from_xml()
+    
+    # Inicia o scheduler
+    scheduler_task = asyncio.create_task(scheduler())
+    logger.info("Aplicação iniciada e scheduler ativo")
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    """Encerramento da aplicação"""
+    global scheduler_task
+    if scheduler_task:
+        scheduler_task.cancel()
+    logger.info("Aplicação encerrada")
+
+@app.get("/")
+async def root():
+    """Endpoint raiz com informações da API"""
+    return {
+        "message": "API Estoque de Veículos",
+        "version": "1.0.0",
+        "last_update": vehicle_data["last_update"].isoformat() if vehicle_data["last_update"] else None,
+        "total_vehicles": len(vehicle_data["data"]["veiculos"]) if vehicle_data["data"] else 0,
+        "endpoints": {
+            "vehicles": "/vehicles - Lista veículos com filtros",
+            "vehicle": "/vehicles/{sequencia} - Busca por sequência",
+            "summary": "/summary - Resumo do estoque",
+            "update": "/update - Força atualização dos dados",
+            "parametros": "placa, modelo, cor, ano, kmmax, valormax"
+        }
+    }
+
+@app.get("/vehicles")
+async def get_vehicles(
+    placa: Optional[str] = Query(None, description="Placa do veículo"),
+    modelo: Optional[str] = Query(None, description="Modelo (busca fuzzy)"),
+    cor: Optional[str] = Query(None, description="Cor (aceita variações)"),
+    ano: Optional[str] = Query(None, description="Ano (busca em 2020/2021 se buscar 2020)"),
+    kmmax: Optional[int] = Query(None, description="KM máximo (cap de km)"),
+    valormax: Optional[int] = Query(None, description="Valor máximo em reais (cap de preço)"),
+    limit: Optional[int] = Query(50, description="Limite de resultados"),
+    offset: Optional[int] = Query(0, description="Offset para paginação")
+):
+    """
+    Busca veículos com filtros
+    
+    - **placa**: Busca parcial na placa
+    - **modelo**: Busca fuzzy no modelo
+    - **cor**: Aceita variações (branco/branca, etc.)
+    - **ano**: Busca fuzzy (2020 encontra 2020/2021)
+    - **kmmax**: Limite máximo de quilometragem
+    - **valormax**: Limite máximo de preço em reais
+    """
+    try:
+        if vehicle_data["data"] is None:
+            raise HTTPException(status_code=503, detail="Dados não disponíveis")
         
-        # Se erro com URL, sugere testar conectividade
-        if fetcher.is_url:
-            print("\nDicas para resolver:")
-            print("1. Verifique se a URL está correta")
-            print("2. Teste a URL no navegador")
-            print("3. Verifique sua conexão com a internet")
-            print(f"4. URL testada: {fetcher.xml_source}")
+        vehicles = vehicle_data["data"]["veiculos"]
+        if not vehicles:
+            return {
+                "total": 0,
+                "limit": limit,
+                "offset": offset,
+                "vehicles": []
+            }
+        
+        filtered_vehicles = []
+        
+        # Normaliza cor se fornecida
+        normalized_color = None
+        if cor:
+            try:
+                normalized_color = normalize_color(cor)
+            except Exception as e:
+                logger.warning(f"Erro ao normalizar cor '{cor}': {e}")
+        
+        for vehicle in vehicles:
+            try:
+                # Filtro por placa (busca parcial)
+                if placa and vehicle.get("placa"):
+                    if placa.upper() not in vehicle["placa"].upper():
+                        continue
+                
+                # Filtro por modelo (fuzzy)
+                if modelo:
+                    try:
+                        if not fuzzy_match_model(modelo, vehicle.get("modelo", "")):
+                            continue
+                    except Exception as e:
+                        logger.warning(f"Erro no fuzzy match para modelo '{modelo}': {e}")
+                        continue
+                
+                # Filtro por cor (normalizada)
+                if normalized_color and vehicle.get("cor") != normalized_color:
+                    continue
+                
+                # Filtro por ano (fuzzy para 2020/2021)
+                if ano:
+                    try:
+                        if not fuzzy_match_year(ano, vehicle.get("ano", "")):
+                            continue
+                    except Exception as e:
+                        logger.warning(f"Erro no fuzzy match para ano '{ano}': {e}")
+                        continue
+                
+                # Filtro por KM máximo
+                if kmmax is not None and vehicle.get("km") is not None:
+                    if vehicle["km"] > kmmax:
+                        continue
+                
+                # Filtro por valor máximo (preço já está em reais)
+                if valormax is not None and vehicle.get("preco") is not None:
+                    if vehicle["preco"] > valormax:
+                        continue
+                
+                filtered_vehicles.append(vehicle)
+                
+            except Exception as e:
+                logger.error(f"Erro ao processar veículo {vehicle.get('sequencia', 'unknown')}: {e}")
+                continue
+        
+        # Aplica paginação
+        total = len(filtered_vehicles)
+        paginated_vehicles = filtered_vehicles[offset:offset + limit]
+        
+        return {
+            "total": total,
+            "limit": limit,
+            "offset": offset,
+            "vehicles": paginated_vehicles
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Erro interno na busca de veículos: {e}")
+        raise HTTPException(status_code=500, detail=f"Erro interno do servidor: {str(e)}")
+
+@app.get("/vehicles/{sequencia}")
+async def get_vehicle_by_sequencia(sequencia: int):
+    """Busca um veículo específico pela sequência"""
+    try:
+        if vehicle_data["data"] is None:
+            raise HTTPException(status_code=503, detail="Dados não disponíveis")
+        
+        vehicles = vehicle_data["data"]["veiculos"]
+        
+        for vehicle in vehicles:
+            if vehicle.get("sequencia") == sequencia:
+                return vehicle
+        
+        raise HTTPException(status_code=404, detail="Veículo não encontrado")
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Erro ao buscar veículo {sequencia}: {e}")
+        raise HTTPException(status_code=500, detail=f"Erro interno do servidor: {str(e)}")
+
+@app.get("/summary")
+async def get_summary():
+    """Retorna resumo estatístico do estoque"""
+    if vehicle_data["data"] is None:
+        raise HTTPException(status_code=503, detail="Dados não disponíveis")
+    
+    try:
+        # Usa o XMLFetcher para gerar o resumo
+        fetcher = XMLFetcher(XML_FILE_PATH)
+        fetcher.data = vehicle_data["data"]  # Usa dados já carregados
+        summary = fetcher.get_summary()
+        
+        # Adiciona informações de atualização
+        summary["data_geracao"] = vehicle_data["data"].get("dataGeracao")
+        summary["ultima_atualizacao"] = vehicle_data["last_update"].isoformat() if vehicle_data["last_update"] else None
+        
+        return summary
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Erro ao gerar resumo: {e}")
+
+@app.post("/update")
+async def force_update(background_tasks: BackgroundTasks):
+    """Força atualização dos dados do XML"""
+    background_tasks.add_task(update_data_from_xml)
+    return {"message": "Atualização iniciada em background"}
+
+@app.get("/colors")
+async def get_available_colors():
+    """Retorna cores disponíveis e suas variações aceitas"""
+    return {
+        "color_mapping": COLOR_MAPPING,
+        "description": "Você pode usar qualquer variação listada para cada cor"
+    }
+
+@app.get("/config")
+async def get_config():
+    """Retorna configurações atuais da API"""
+    from xml_fetcher import XML_URL
+    
+    return {
+        "xml_url": XML_URL,
+        "update_interval_hours": UPDATE_INTERVAL_HOURS,
+        "fuzzy_threshold": FUZZY_THRESHOLD,
+        "json_output": JSON_FILE_PATH,
+        "note": "Configure a URL no arquivo xml_fetcher.py"
+    }
+    """Verifica saúde da aplicação"""
+    from xml_fetcher import XML_URL
+    
+    status = "healthy" if vehicle_data["data"] is not None else "unhealthy"
+    
+    return {
+        "status": status,
+        "last_update": vehicle_data["last_update"].isoformat() if vehicle_data["last_update"] else None,
+        "total_vehicles": len(vehicle_data["data"]["veiculos"]) if vehicle_data["data"] else 0,
+        "xml_url": XML_URL,
+        "json_file_exists": Path(JSON_FILE_PATH).exists()
+    }
+
+if __name__ == "__main__":
+    uvicorn.run(
+        "main:app",
+        host="0.0.0.0",
+        port=8000,
+        reload=True,
+        log_level="info"
+    )
