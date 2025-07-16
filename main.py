@@ -70,37 +70,59 @@ def fuzzy_match_model(search_term: str, model: str, threshold: int = FUZZY_THRES
     search_normalized = normalize_string(search_term)
     model_normalized = normalize_string(model)
     
-    # 1. Busca exata normalizada
+    # 1. BUSCA EXATA: Mais importante - deve ter prioridade
     if search_normalized in model_normalized:
         return True
     
-    # 2. Busca parcial com strings normalizadas
-    if fuzz.partial_ratio(search_normalized, model_normalized) >= threshold:
-        return True
-    
-    # 3. Busca com ordenação de tokens
-    if fuzz.token_sort_ratio(search_normalized, model_normalized) >= threshold:
-        return True
-    
-    # 4. Busca em palavras individuais (mais flexível)
+    # 2. BUSCA POR PALAVRAS EXATAS: Cada palavra do search deve estar no modelo
     search_words = search_normalized.split()
     model_words = model_normalized.split()
     
-    for search_word in search_words:
+    # Para buscas específicas como "s10", deve encontrar palavra similar
+    if len(search_words) == 1:
+        search_word = search_words[0]
         for model_word in model_words:
+            # Busca exata na palavra
             if search_word == model_word:
                 return True
-            if len(search_word) >= 2 and fuzz.ratio(search_word, model_word) >= 70:
+            # Busca substring apenas se for bem específica
+            if len(search_word) >= 3 and search_word in model_word:
                 return True
-            if len(search_word) >= 2 and search_word in model_word:
+            # Fuzzy apenas para palavras muito similares (>= 90%)
+            if len(search_word) >= 3 and fuzz.ratio(search_word, model_word) >= 90:
                 return True
     
-    # 5. Último recurso: busca muito flexível para casos como s-10 vs s10
+    # 3. BUSCA MÚLTIPLAS PALAVRAS: Todas as palavras devem ter match
+    else:
+        matches = 0
+        for search_word in search_words:
+            word_found = False
+            for model_word in model_words:
+                if (search_word == model_word or 
+                    (len(search_word) >= 3 and search_word in model_word) or
+                    (len(search_word) >= 3 and fuzz.ratio(search_word, model_word) >= 85)):
+                    word_found = True
+                    break
+            if word_found:
+                matches += 1
+        
+        # Todas as palavras devem ter match
+        if matches == len(search_words):
+            return True
+    
+    # 4. ÚLTIMO RECURSO: Apenas para casos muito específicos como "s-10" vs "s10"
     search_clean = ''.join(c for c in search_normalized if c.isalnum())
     model_clean = ''.join(c for c in model_normalized if c.isalnum())
     
-    if len(search_clean) >= 2 and search_clean in model_clean:
-        return True
+    # Deve ser match exato ou quase exato após limpeza
+    if len(search_clean) >= 3:
+        for model_word in model_words:
+            model_word_clean = ''.join(c for c in model_word if c.isalnum())
+            if search_clean == model_word_clean:
+                return True
+            # Apenas se for muito similar (>= 95%)
+            if len(search_clean) >= 3 and fuzz.ratio(search_clean, model_word_clean) >= 95:
+                return True
     
     return False
 
