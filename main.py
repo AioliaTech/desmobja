@@ -15,8 +15,9 @@ from xml_fetcher import XMLFetcher
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+from xml_fetcher import XMLFetcher
+
 # Configurações
-XML_FILE_PATH = "estoque.xml"
 JSON_FILE_PATH = "estoque.json"
 UPDATE_INTERVAL_HOURS = 2
 FUZZY_THRESHOLD = 85
@@ -132,12 +133,10 @@ async def update_data_from_xml():
     try:
         logger.info("Iniciando atualização dos dados...")
         
-        if not Path(XML_FILE_PATH).exists():
-            logger.error(f"Arquivo XML não encontrado: {XML_FILE_PATH}")
-            return
+        # Usa XMLFetcher com configuração padrão (da URL configurada)
+        fetcher = XMLFetcher()
         
-        # Usa o XMLFetcher para converter XML para JSON
-        fetcher = XMLFetcher(XML_FILE_PATH)
+        # Processa o XML
         data = fetcher.parse_xml()
         fetcher.save_json(JSON_FILE_PATH)
         
@@ -145,9 +144,11 @@ async def update_data_from_xml():
         await load_vehicle_data()
         
         logger.info(f"Dados atualizados com sucesso: {len(data.get('veiculos', []))} veículos")
+        logger.info(f"Fonte: {fetcher.xml_source}")
         
     except Exception as e:
         logger.error(f"Erro ao atualizar dados: {e}")
+        logger.error(f"Verifique se a URL está configurada corretamente no xml_fetcher.py")
 
 async def scheduler():
     """Scheduler para atualizar dados a cada 2 horas"""
@@ -350,16 +351,28 @@ async def get_available_colors():
         "description": "Você pode usar qualquer variação listada para cada cor"
     }
 
-@app.get("/health")
-async def health_check():
+@app.get("/config")
+async def get_config():
+    """Retorna configurações atuais da API"""
+    from xml_fetcher import XML_URL
+    
+    return {
+        "xml_url": XML_URL,
+        "update_interval_hours": UPDATE_INTERVAL_HOURS,
+        "fuzzy_threshold": FUZZY_THRESHOLD,
+        "json_output": JSON_FILE_PATH,
+        "note": "Configure a URL no arquivo xml_fetcher.py"
+    }
     """Verifica saúde da aplicação"""
+    from xml_fetcher import XML_URL
+    
     status = "healthy" if vehicle_data["data"] is not None else "unhealthy"
     
     return {
         "status": status,
         "last_update": vehicle_data["last_update"].isoformat() if vehicle_data["last_update"] else None,
         "total_vehicles": len(vehicle_data["data"]["veiculos"]) if vehicle_data["data"] else 0,
-        "xml_file_exists": Path(XML_FILE_PATH).exists(),
+        "xml_url": XML_URL,
         "json_file_exists": Path(JSON_FILE_PATH).exists()
     }
 
