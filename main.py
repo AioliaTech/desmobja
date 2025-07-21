@@ -17,7 +17,7 @@ logger = logging.getLogger(__name__)
 
 # Configurações
 JSON_FILE_PATH = "estoque.json"
-UPDATE_INTERVAL_MINUTES = 2  # Alterado para 2 minutos
+UPDATE_INTERVAL_MINUTES = 60  # Alterado para 60 minutos (1 hora)
 FUZZY_THRESHOLD = 85
 
 app = FastAPI(
@@ -173,7 +173,7 @@ async def update_data_from_xml():
         logger.error(f"🔧 Verifique se a URL está configurada corretamente no xml_fetcher.py")
 
 async def scheduler():
-    """Scheduler para atualizar dados a cada 2 minutos"""
+    """Scheduler para atualizar dados a cada hora (complementar ao cron externo)"""
     while True:
         try:
             current_time = datetime.now().strftime("%H:%M:%S")
@@ -182,6 +182,7 @@ async def scheduler():
             await update_data_from_xml()
             
             logger.info(f"⌛ Próxima atualização em {UPDATE_INTERVAL_MINUTES} minutos...")
+            logger.info(f"🔧 Cron externo configurado para executar no minuto 5 de cada hora")
             await asyncio.sleep(UPDATE_INTERVAL_MINUTES * 60)  # Convertido para segundos
             
         except Exception as e:
@@ -201,6 +202,7 @@ async def startup_event():
     
     scheduler_task = asyncio.create_task(scheduler())
     logger.info(f"🚀 Aplicação iniciada e scheduler ativo (interval: {UPDATE_INTERVAL_MINUTES} minutos)")
+    logger.info(f"🔧 Configure o cron externo: 5 * * * * /caminho/para/update_api.sh")
 
 @app.on_event("shutdown")
 async def shutdown_event():
@@ -218,7 +220,7 @@ async def root():
         "version": "1.0.0",
         "last_update": vehicle_data["last_update"].isoformat() if vehicle_data["last_update"] else None,
         "total_vehicles": len(vehicle_data["data"]["veiculos"]) if vehicle_data["data"] else 0,
-        "scheduler_interval": f"{UPDATE_INTERVAL_MINUTES} minutos",
+        "scheduler_interval": f"{UPDATE_INTERVAL_MINUTES} minutos (+ cron externo no minuto 5)",
         "endpoints": {
             "vehicles": "/vehicles - Lista veículos com filtros (sem limite)",
             "vehicle": "/vehicles/{sequencia} - Busca por sequência",
@@ -500,7 +502,7 @@ async def health_check():
         "total_vehicles": len(vehicle_data["data"]["veiculos"]) if vehicle_data["data"] else 0,
         "xml_url": XML_URL,
         "json_file_exists": Path(JSON_FILE_PATH).exists(),
-        "scheduler_interval": f"{UPDATE_INTERVAL_MINUTES} minutos"
+        "scheduler_interval": f"{UPDATE_INTERVAL_MINUTES} minutos (+ cron externo no minuto 5)"
     }
 
 if __name__ == "__main__":
