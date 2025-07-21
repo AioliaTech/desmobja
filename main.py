@@ -17,7 +17,7 @@ logger = logging.getLogger(__name__)
 
 # Configurações
 JSON_FILE_PATH = "estoque.json"
-UPDATE_INTERVAL_HOURS = 2
+UPDATE_INTERVAL_MINUTES = 2  # Alterado para 2 minutos
 FUZZY_THRESHOLD = 85
 
 app = FastAPI(
@@ -157,7 +157,7 @@ async def load_vehicle_data():
 async def update_data_from_xml():
     """Atualiza os dados convertendo XML para JSON"""
     try:
-        logger.info("Iniciando atualização dos dados...")
+        logger.info("🔄 Iniciando atualização automática dos dados...")
         
         fetcher = XMLFetcher()
         data = fetcher.parse_xml()
@@ -165,22 +165,29 @@ async def update_data_from_xml():
         
         await load_vehicle_data()
         
-        logger.info(f"Dados atualizados com sucesso: {len(data.get('veiculos', []))} veículos")
-        logger.info(f"Fonte: {fetcher.xml_source}")
+        logger.info(f"✅ Dados atualizados com sucesso: {len(data.get('veiculos', []))} veículos")
+        logger.info(f"📡 Fonte: {fetcher.xml_source}")
         
     except Exception as e:
-        logger.error(f"Erro ao atualizar dados: {e}")
-        logger.error(f"Verifique se a URL está configurada corretamente no xml_fetcher.py")
+        logger.error(f"❌ Erro ao atualizar dados: {e}")
+        logger.error(f"🔧 Verifique se a URL está configurada corretamente no xml_fetcher.py")
 
 async def scheduler():
-    """Scheduler para atualizar dados a cada 2 horas"""
+    """Scheduler para atualizar dados a cada 2 minutos"""
     while True:
         try:
+            current_time = datetime.now().strftime("%H:%M:%S")
+            logger.info(f"⏰ [{current_time}] Executando atualização automática do scheduler...")
+            
             await update_data_from_xml()
-            await asyncio.sleep(UPDATE_INTERVAL_HOURS * 3600)
+            
+            logger.info(f"⌛ Próxima atualização em {UPDATE_INTERVAL_MINUTES} minutos...")
+            await asyncio.sleep(UPDATE_INTERVAL_MINUTES * 60)  # Convertido para segundos
+            
         except Exception as e:
-            logger.error(f"Erro no scheduler: {e}")
-            await asyncio.sleep(300)
+            logger.error(f"❌ Erro no scheduler: {e}")
+            logger.info(f"🔄 Tentando novamente em 30 segundos...")
+            await asyncio.sleep(30)
 
 @app.on_event("startup")
 async def startup_event():
@@ -193,7 +200,7 @@ async def startup_event():
         await update_data_from_xml()
     
     scheduler_task = asyncio.create_task(scheduler())
-    logger.info("Aplicação iniciada e scheduler ativo")
+    logger.info(f"🚀 Aplicação iniciada e scheduler ativo (interval: {UPDATE_INTERVAL_MINUTES} minutos)")
 
 @app.on_event("shutdown")
 async def shutdown_event():
@@ -201,7 +208,7 @@ async def shutdown_event():
     global scheduler_task
     if scheduler_task:
         scheduler_task.cancel()
-    logger.info("Aplicação encerrada")
+    logger.info("🛑 Aplicação encerrada")
 
 @app.get("/")
 async def root():
@@ -211,8 +218,9 @@ async def root():
         "version": "1.0.0",
         "last_update": vehicle_data["last_update"].isoformat() if vehicle_data["last_update"] else None,
         "total_vehicles": len(vehicle_data["data"]["veiculos"]) if vehicle_data["data"] else 0,
+        "scheduler_interval": f"{UPDATE_INTERVAL_MINUTES} minutos",
         "endpoints": {
-            "vehicles": "/vehicles - Lista veículos com filtros",
+            "vehicles": "/vehicles - Lista veículos com filtros (sem limite)",
             "vehicle": "/vehicles/{sequencia} - Busca por sequência",
             "summary": "/summary - Resumo do estoque",
             "update": "/update - Força atualização dos dados",
@@ -228,10 +236,10 @@ async def get_vehicles(
     ano: Optional[str] = Query(None, description="Ano (busca em 2020/2021 se buscar 2020)"),
     kmmax: Optional[int] = Query(None, description="KM máximo (cap de km)"),
     valormax: Optional[int] = Query(None, description="Valor máximo em reais (cap de preço)"),
-    limit: Optional[int] = Query(50, description="Limite de resultados"),
+    limit: Optional[int] = Query(None, description="Limite de resultados (opcional)"),
     offset: Optional[int] = Query(0, description="Offset para paginação")
 ):
-    """Busca veículos com filtros"""
+    """Busca veículos com filtros - sem limite padrão de resultados"""
     try:
         if vehicle_data["data"] is None:
             raise HTTPException(status_code=503, detail="Dados não disponíveis")
@@ -292,7 +300,16 @@ async def get_vehicles(
                 continue
         
         total = len(filtered_vehicles)
-        paginated_vehicles = filtered_vehicles[offset:offset + limit]
+        
+        # Aplicar paginação somente se limit for especificado
+        if limit is not None:
+            paginated_vehicles = filtered_vehicles[offset:offset + limit]
+        else:
+            # Se offset for especificado sem limit, aplicar apenas offset
+            if offset > 0:
+                paginated_vehicles = filtered_vehicles[offset:]
+            else:
+                paginated_vehicles = filtered_vehicles
         
         return {
             "total": total,
@@ -371,7 +388,7 @@ async def get_config():
     
     return {
         "xml_url": XML_URL,
-        "update_interval_hours": UPDATE_INTERVAL_HOURS,
+        "update_interval_minutes": UPDATE_INTERVAL_MINUTES,
         "fuzzy_threshold": FUZZY_THRESHOLD,
         "json_output": JSON_FILE_PATH,
         "note": "Configure a URL no arquivo xml_fetcher.py"
@@ -389,7 +406,8 @@ async def health_check():
         "last_update": vehicle_data["last_update"].isoformat() if vehicle_data["last_update"] else None,
         "total_vehicles": len(vehicle_data["data"]["veiculos"]) if vehicle_data["data"] else 0,
         "xml_url": XML_URL,
-        "json_file_exists": Path(JSON_FILE_PATH).exists()
+        "json_file_exists": Path(JSON_FILE_PATH).exists(),
+        "scheduler_interval": f"{UPDATE_INTERVAL_MINUTES} minutos"
     }
 
 if __name__ == "__main__":
