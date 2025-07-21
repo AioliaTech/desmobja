@@ -10,6 +10,7 @@ from rapidfuzz import fuzz
 import re
 import uvicorn
 from xml_fetcher import XMLFetcher
+from apscheduler.schedulers.background import BackgroundScheduler
 
 # Configuração de logging
 logging.basicConfig(level=logging.INFO)
@@ -17,7 +18,6 @@ logger = logging.getLogger(__name__)
 
 # Configurações
 JSON_FILE_PATH = "estoque.json"
-UPDATE_INTERVAL_MINUTES = 60  # Alterado para 60 minutos (1 hora)
 FUZZY_THRESHOLD = 85
 
 app = FastAPI(
@@ -28,7 +28,6 @@ app = FastAPI(
 
 # Variáveis globais para armazenar dados
 vehicle_data = {"data": None, "last_update": None}
-scheduler_task = None
 
 # Mapeamento de cores flexível
 COLOR_MAPPING = {
