@@ -352,8 +352,7 @@ async def get_catalogo(
     cor: Optional[str] = Query(None, description="Cor (aceita variações)"),
     ano: Optional[str] = Query(None, description="Ano"),
     kmmax: Optional[int] = Query(None, description="KM máximo"),
-    valormax: Optional[int] = Query(None, description="Valor máximo em reais"),
-    format: Optional[str] = Query("text", description="Formato de resposta: 'text' ou 'json'")
+    valormax: Optional[int] = Query(None, description="Valor máximo em reais")
 ):
     """Retorna catálogo de veículos em formato texto, uma linha por veículo"""
     try:
@@ -362,10 +361,7 @@ async def get_catalogo(
         
         vehicles = vehicle_data["data"]["veiculos"]
         if not vehicles:
-            if format.lower() == "json":
-                return {"total": 0, "vehicles": []}
-            else:
-                return "Nenhum veículo encontrado no estoque."
+            return "Nenhum veículo encontrado no estoque."
         
         filtered_vehicles = []
         
@@ -430,23 +426,11 @@ async def get_catalogo(
             line = f"{modelo} - {ano} - {km_formatted}"
             catalog_lines.append(line)
         
-        if format.lower() == "json":
-            return {
-                "total": len(catalog_lines),
-                "vehicles": catalog_lines
-            }
-        else:
-            # Retornar como texto simples
-            if not catalog_lines:
-                return "Nenhum veículo encontrado com os filtros especificados."
-            
-            catalog_text = "\n".join(catalog_lines)
-            
-            # Adicionar cabeçalho com total
-            header = f"CATÁLOGO DE VEÍCULOS ({len(catalog_lines)} veículos encontrados)\n"
-            header += "=" * 50 + "\n\n"
-            
-            return header + catalog_text
+        if not catalog_lines:
+            return "Nenhum veículo encontrado com os filtros especificados."
+        
+        catalog_text = "\n".join(catalog_lines)
+        return catalog_text
         
     except HTTPException:
         raise
