@@ -171,44 +171,35 @@ async def update_data_from_xml():
         logger.error(f"❌ Erro ao atualizar dados: {e}")
         logger.error(f"🔧 Verifique se a URL está configurada corretamente no xml_fetcher.py")
 
-async def scheduler():
-    """Scheduler para atualizar dados a cada hora (complementar ao cron externo)"""
-    while True:
-        try:
-            current_time = datetime.now().strftime("%H:%M:%S")
-            logger.info(f"⏰ [{current_time}] Executando atualização automática do scheduler...")
-            
-            await update_data_from_xml()
-            
-            logger.info(f"⌛ Próxima atualização em {UPDATE_INTERVAL_MINUTES} minutos...")
-            logger.info(f"🔧 Cron externo configurado para executar no minuto 5 de cada hora")
-            await asyncio.sleep(UPDATE_INTERVAL_MINUTES * 60)  # Convertido para segundos
-            
-        except Exception as e:
-            logger.error(f"❌ Erro no scheduler: {e}")
-            logger.info(f"🔄 Tentando novamente em 30 segundos...")
-            await asyncio.sleep(30)
+def wrapped_update_data():
+    """Wrapper síncrono para o scheduler"""
+    import asyncio
+    try:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        loop.run_until_complete(update_data_from_xml())
+        loop.close()
+    except Exception as e:
+        logger.error(f"❌ Erro no wrapper de atualização: {e}")
 
 @app.on_event("startup")
 async def startup_event():
-    """Inicialização da aplicação"""
-    global scheduler_task
-    
+    """Agenda tarefas de atualização de dados"""
     await load_vehicle_data()
     
     if vehicle_data["data"] is None:
-        await update_data_from_xml()
+        wrapped_update_data()  # Executa uma vez na inicialização
     
-    scheduler_task = asyncio.create_task(scheduler())
-    logger.info(f"🚀 Aplicação iniciada e scheduler ativo (interval: {UPDATE_INTERVAL_MINUTES} minutos)")
-    logger.info(f"🔧 Configure o cron externo: 5 * * * * /caminho/para/update_api.sh")
+    scheduler = BackgroundScheduler(timezone="America/Sao_Paulo")
+    scheduler.add_job(wrapped_update_data, "cron", minute=5)
+    scheduler.start()
+    
+    logger.info("🚀 Aplicação iniciada com scheduler ativo")
+    logger.info("🕐 Atualizações automáticas no minuto 5 de cada hora")
 
 @app.on_event("shutdown")
 async def shutdown_event():
     """Encerramento da aplicação"""
-    global scheduler_task
-    if scheduler_task:
-        scheduler_task.cancel()
     logger.info("🛑 Aplicação encerrada")
 
 @app.get("/")
@@ -219,7 +210,7 @@ async def root():
         "version": "1.0.0",
         "last_update": vehicle_data["last_update"].isoformat() if vehicle_data["last_update"] else None,
         "total_vehicles": len(vehicle_data["data"]["veiculos"]) if vehicle_data["data"] else 0,
-        "scheduler_interval": f"{UPDATE_INTERVAL_MINUTES} minutos (+ cron externo no minuto 5)",
+        "scheduler_interval": "Minuto 5 de cada hora (APScheduler)",
         "endpoints": {
             "vehicles": "/vehicles - Lista veículos com filtros (sem limite)",
             "vehicle": "/vehicles/{sequencia} - Busca por sequência",
@@ -501,7 +492,7 @@ async def health_check():
         "total_vehicles": len(vehicle_data["data"]["veiculos"]) if vehicle_data["data"] else 0,
         "xml_url": XML_URL,
         "json_file_exists": Path(JSON_FILE_PATH).exists(),
-        "scheduler_interval": f"{UPDATE_INTERVAL_MINUTES} minutos (+ cron externo no minuto 5)"
+        "scheduler_interval": "Minuto 5 de cada hora (APScheduler)"
     }
 
 if __name__ == "__main__":
